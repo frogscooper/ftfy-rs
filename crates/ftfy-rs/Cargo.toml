@@ -1,0 +1,15 @@
+[package]
+name = "ftfy-rs"
+description = "Fixes mojibake and other glitches in Unicode text. A faithful Rust port of Python's ftfy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords = ["unicode", "mojibake", "encoding", "text", "ftfy"]
+categories = ["text-processing", "encoding"]
+
+[lib]
+name = "ftfy_rs"
+
+[dependencies]
+regex = "1"
+unicode-normalization = "0.1"

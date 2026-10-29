@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ftfy-rs"
+description = "A fast, drop-in replacement for ftfy (fixes text for you), written in Rust"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dynamic = ["version"]
+keywords = ["unicode", "mojibake", "encoding", "ftfy", "text"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Text Processing",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "ftfy==6.3.1"]
+
+[tool.maturin]
+manifest-path = "crates/ftfy-py/Cargo.toml"
+python-source = "python"
+module-name = "ftfy_rs._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

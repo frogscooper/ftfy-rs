@@ -1,0 +1,7 @@
+/target
+/.venv
+__pycache__/
+*.pyd
+*.so
+.pytest_cache/
+/build-in-public

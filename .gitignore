@@ -5,3 +5,4 @@ __pycache__/
 *.so
 .pytest_cache/
 /build-in-public
+*.pdb

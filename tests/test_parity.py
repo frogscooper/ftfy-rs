@@ -252,3 +252,23 @@ def test_long_text_parity():
     assert ftfy_rs.fix_text(joined, max_decode_length=300) == ftfy.fix_text(
         joined, max_decode_length=300
     )
+
+
+# Mismatches found by long fuzzing runs, kept as fixed regression cases.
+REGRESSIONS = [
+    # The Rust side has newer Unicode data: U+0558 is unassigned in Python
+    # 3.13's unicodedata, and must not be normalized.
+    ("Ęюο\xdf\xcdХ\x98\xb9č", dict(normalization="NFKC", max_decode_length=17)),
+    ("x՘\xb9", dict(normalization="NFKC")),
+    # ftfy's utf-8-variants codec takes a final "\n" as the last byte of a
+    # CESU-8 pair (a regex `$` quirk), turning this into U+1F60A.
+    ("\xed\xa0\xbd\xed\xb8\r\n", {}),
+    ("\xed\xa0\xbd\xed\xb8\n", {}),
+    ("null\xc3\x80\n", {}),
+]
+
+
+@pytest.mark.parametrize("text,kwargs", REGRESSIONS)
+def test_regressions(text, kwargs):
+    assert ftfy_rs.fix_text(text, **kwargs) == ftfy.fix_text(text, **kwargs)
+    assert ftfy_rs.fix_and_explain(text, **kwargs) == ftfy.fix_and_explain(text, **kwargs)

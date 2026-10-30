@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, NamedTuple, 
 
 from ftfy_rs import _native, bad_codecs, chardata, fixes
 from ftfy_rs.badness import is_bad
-from ftfy_rs.formatting import display_ljust
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -28,6 +27,13 @@ __version__ = "0.1.0"
 __ftfy_version__ = "6.3.1"
 
 bad_codecs.ok()
+
+# Normalization uses Rust's Unicode data, which may be newer than this
+# Python's. Characters this Python doesn't have must be left alone, as
+# `unicodedata.normalize` does, for the results to match.
+_native._set_unassigned(
+    [ch for ch in _native._normalization_candidates() if unicodedata.category(ch) == "Cn"]
+)
 
 
 class ExplanationStep(NamedTuple):
@@ -356,6 +362,9 @@ def explain_unicode(text: str) -> None:
     hexadecimal, its glyph, its category in the Unicode standard, and its name
     in the Unicode standard.
     """
+    # Imported here because it pulls in wcwidth, which is slow to import.
+    from ftfy_rs.formatting import display_ljust
+
     for char in text:
         if char.isprintable():
             display = char

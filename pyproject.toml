@@ -17,6 +17,12 @@ classifiers = [
     "Topic :: Text Processing",
 ]
 
+[project.urls]
+Repository = "https://github.com/frogscooper/ftfy-rs"
+
+[project.scripts]
+ftfy-rs = "ftfy_rs.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest", "ftfy==6.3.1"]
 

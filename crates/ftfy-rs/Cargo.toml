@@ -4,6 +4,8 @@ description = "Fixes mojibake and other glitches in Unicode text. A faithful Rus
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
 keywords = ["unicode", "mojibake", "encoding", "text", "ftfy"]
 categories = ["text-processing", "encoding"]
 

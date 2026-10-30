@@ -15,17 +15,16 @@
 
 use std::borrow::Cow;
 
-use unicode_normalization::{
-    is_nfc_quick, is_nfd_quick, is_nfkc_quick, is_nfkd_quick, IsNormalized, UnicodeNormalization,
-};
-
 pub mod badness;
 pub mod chardata;
 pub mod fixes;
+pub mod normalize;
+mod scan;
 mod tables;
 
 pub use badness::{badness, is_bad};
 pub use chardata::{decode_utf8_variants, possible_encoding, CHARMAP_ENCODINGS};
+pub use normalize::normalize;
 
 use chardata::{decode_charmap, encode_charmap, has_bit, possible_encodings, LATIN_1, WINDOWS_1252};
 
@@ -207,62 +206,61 @@ pub fn fix_and_explain(
     let mut current = text.to_string();
     loop {
         let mut text = Cow::Borrowed(current.as_str());
+        // Which fixers could change the text; rescanned whenever it changes.
+        let mut bits = scan::scan(&text);
 
-        if config.unescape_html != UnescapeHtml::Never {
-            text = try_fix(text, fixes::unescape_html, "unescape_html", &mut steps);
+        if config.unescape_html != UnescapeHtml::Never && bits & scan::AMPERSAND != 0 {
+            try_fix(&mut text, &mut bits, fixes::unescape_html, "unescape_html", &mut steps);
         }
 
-        if config.fix_encoding {
-            text = match &mut steps {
+        if config.fix_encoding && bits & scan::NON_ASCII != 0 {
+            let fixed = match &mut steps {
                 // Python ftfy calls fix_encoding() here without passing on
                 // the config, so the encoding sub-options only take effect
                 // when explanations are on.
-                None => cow_map(text, |t| fix_encoding_cow(t, &TextFixerConfig::no_explain())),
+                None => into_changed(fix_encoding_cow(&text, &TextFixerConfig::no_explain())),
                 Some(steps) => {
                     let (fixed, encoding_steps) = fix_encoding_and_explain_cow(&text, &config);
                     steps.extend(encoding_steps);
-                    match into_changed(fixed) {
-                        Some(fixed) => Cow::Owned(fixed),
-                        None => text,
-                    }
+                    into_changed(fixed)
                 }
             };
+            if let Some(fixed) = fixed {
+                bits = scan::scan(&fixed);
+                text = Cow::Owned(fixed);
+            }
         }
 
-        if config.fix_c1_controls {
-            text = try_fix(text, fixes::fix_c1_controls, "fix_c1_controls", &mut steps);
-        }
-        if config.fix_latin_ligatures {
-            text = try_fix(text, fixes::fix_latin_ligatures, "fix_latin_ligatures", &mut steps);
-        }
-        if config.fix_character_width {
-            text = try_fix(text, fixes::fix_character_width, "fix_character_width", &mut steps);
-        }
-        if config.uncurl_quotes {
-            text = try_fix(text, fixes::uncurl_quotes, "uncurl_quotes", &mut steps);
-        }
-        if config.fix_line_breaks {
-            text = try_fix(text, fixes::fix_line_breaks, "fix_line_breaks", &mut steps);
-        }
-        if config.fix_surrogates && config.surrogates_escaped {
-            text = try_fix(text, fixes::fix_escaped_surrogates, "fix_surrogates", &mut steps);
-        }
-        if config.remove_terminal_escapes {
-            text = try_fix(
-                text,
+        let fixers: [(bool, u16, Fixer, &str); 8] = [
+            (config.fix_c1_controls, scan::C1_CONTROL, fixes::fix_c1_controls, "fix_c1_controls"),
+            (config.fix_latin_ligatures, scan::LIGATURE, fixes::fix_latin_ligatures, "fix_latin_ligatures"),
+            (config.fix_character_width, scan::WIDTH, fixes::fix_character_width, "fix_character_width"),
+            (config.uncurl_quotes, scan::CURLY_QUOTE, fixes::uncurl_quotes, "uncurl_quotes"),
+            (config.fix_line_breaks, scan::LINE_BREAK, fixes::fix_line_breaks, "fix_line_breaks"),
+            (
+                config.fix_surrogates && config.surrogates_escaped,
+                scan::ESCAPED_SURROGATE,
+                fixes::fix_escaped_surrogates,
+                "fix_surrogates",
+            ),
+            (
+                config.remove_terminal_escapes,
+                scan::ESCAPE,
                 fixes::remove_terminal_escapes,
                 "remove_terminal_escapes",
-                &mut steps,
-            );
-        }
-        if config.remove_control_chars {
-            text = try_fix(text, fixes::remove_control_chars, "remove_control_chars", &mut steps);
+            ),
+            (config.remove_control_chars, scan::CONTROL, fixes::remove_control_chars, "remove_control_chars"),
+        ];
+        for (enabled, bit, fixer, name) in fixers {
+            if enabled && bits & bit != 0 {
+                try_fix(&mut text, &mut bits, fixer, name, &mut steps);
+            }
         }
 
         if let Some(form) = config.normalization {
-            let fixed = normalize(&text, form);
-            if let Cow::Owned(fixed) = fixed {
-                if fixed != *text {
+            let already_nfc = form == Normalization::Nfc && bits & scan::ABOVE_U0300 == 0;
+            if bits & scan::NON_ASCII != 0 && !already_nfc {
+                if let Some(fixed) = into_changed(normalize(&text, form)) {
                     if let Some(steps) = &mut steps {
                         steps.push(step("normalize", form.name()));
                     }
@@ -282,13 +280,7 @@ pub fn fix_and_explain(
     }
 }
 
-/// Apply a fixer to a Cow, keeping it borrowed if nothing changed.
-fn cow_map<'a>(text: Cow<'a, str>, f: impl FnOnce(&str) -> Cow<'_, str>) -> Cow<'a, str> {
-    match into_changed(f(&text)) {
-        Some(fixed) => Cow::Owned(fixed),
-        None => text,
-    }
-}
+type Fixer = fn(&str) -> Cow<'_, str>;
 
 /// The new text if a fixer allocated one, or None if it returned its input.
 fn into_changed(text: Cow<'_, str>) -> Option<String> {
@@ -298,50 +290,25 @@ fn into_changed(text: Cow<'_, str>) -> Option<String> {
     }
 }
 
-fn try_fix<'a>(
-    text: Cow<'a, str>,
-    fixer: fn(&str) -> Cow<'_, str>,
+/// Apply a fixer, recording it and rescanning the text if it changed.
+fn try_fix(
+    text: &mut Cow<'_, str>,
+    bits: &mut u16,
+    fixer: Fixer,
     name: &'static str,
     steps: &mut Option<Vec<ExplanationStep>>,
-) -> Cow<'a, str> {
-    let Some(fixed) = into_changed(fixer(&text)) else {
-        return text;
+) {
+    let Some(fixed) = into_changed(fixer(text)) else {
+        return;
     };
-    if fixed == *text {
-        return text;
+    if fixed == **text {
+        return;
     }
     if let Some(steps) = steps {
         steps.push(step("apply", name));
     }
-    Cow::Owned(fixed)
-}
-
-/// Apply Unicode normalization, returning Borrowed if the text was already
-/// normalized.
-pub fn normalize(text: &str, form: Normalization) -> Cow<'_, str> {
-    if text.is_ascii() {
-        return Cow::Borrowed(text);
-    }
-    let quick = match form {
-        Normalization::Nfc => is_nfc_quick(text.chars()),
-        Normalization::Nfd => is_nfd_quick(text.chars()),
-        Normalization::Nfkc => is_nfkc_quick(text.chars()),
-        Normalization::Nfkd => is_nfkd_quick(text.chars()),
-    };
-    if quick == IsNormalized::Yes {
-        return Cow::Borrowed(text);
-    }
-    let normalized: String = match form {
-        Normalization::Nfc => text.nfc().collect(),
-        Normalization::Nfd => text.nfd().collect(),
-        Normalization::Nfkc => text.nfkc().collect(),
-        Normalization::Nfkd => text.nfkd().collect(),
-    };
-    if normalized == text {
-        Cow::Borrowed(text)
-    } else {
-        Cow::Owned(normalized)
-    }
+    *bits = scan::scan(&fixed);
+    *text = Cow::Owned(fixed);
 }
 
 /// Apply just the encoding-fixing steps of ftfy, discarding the explanation.
@@ -417,10 +384,11 @@ fn fix_encoding_one_step(
         }
 
         if config.replace_lossy_sequences && encoding.starts_with("sloppy") {
-            let replaced = fixes::replace_lossy_sequences(&bytes);
-            if replaced != bytes {
-                steps.push(step("transcode", "replace_lossy_sequences"));
-                bytes = replaced;
+            if let Cow::Owned(replaced) = fixes::replace_lossy_sequences_cow(&bytes) {
+                if replaced != bytes {
+                    steps.push(step("transcode", "replace_lossy_sequences"));
+                    bytes = replaced;
+                }
             }
         }
 

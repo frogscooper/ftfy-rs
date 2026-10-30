@@ -94,33 +94,59 @@ pub(crate) fn has_bit(mask: u16, index: usize) -> bool {
     mask & (1 << index) != 0
 }
 
-static ENCODERS: LazyLock<Vec<HashMap<char, u8>>> = LazyLock::new(|| {
-    CHARMAPS
-        .iter()
-        .map(|(_, table)| {
-            let mut map = HashMap::new();
-            for (byte, &cp) in table.iter().enumerate() {
-                if cp != NO_CHAR && cp >= 0x80 {
-                    map.insert(char::from_u32(cp).unwrap(), byte as u8);
-                }
+const NO_BYTE: u16 = 0xFFFF;
+
+/// A single-byte encoder: a direct lookup table for characters below
+/// MASK_DIRECT_LEN, and a short sorted list for the rest.
+struct Encoder {
+    direct: Vec<u16>,
+    extra: Vec<(char, u8)>,
+}
+
+impl Encoder {
+    fn new(table: &[u32; 256]) -> Self {
+        let mut direct = vec![NO_BYTE; MASK_DIRECT_LEN];
+        let mut extra = Vec::new();
+        for cp in 0..0x80 {
+            if table[cp] == cp as u32 {
+                direct[cp] = cp as u16;
             }
-            map
-        })
-        .collect()
-});
+        }
+        for (byte, &cp) in table.iter().enumerate() {
+            if cp == NO_CHAR || cp < 0x80 {
+                continue;
+            }
+            if (cp as usize) < MASK_DIRECT_LEN {
+                direct[cp as usize] = byte as u16;
+            } else {
+                extra.push((char::from_u32(cp).unwrap(), byte as u8));
+            }
+        }
+        extra.sort_unstable();
+        Encoder { direct, extra }
+    }
+
+    fn encode(&self, ch: char) -> Option<u8> {
+        let cp = ch as usize;
+        if cp < MASK_DIRECT_LEN {
+            let byte = self.direct[cp];
+            (byte != NO_BYTE).then_some(byte as u8)
+        } else {
+            let i = self.extra.binary_search_by_key(&ch, |&(c, _)| c).ok()?;
+            Some(self.extra[i].1)
+        }
+    }
+}
+
+static ENCODERS: LazyLock<Vec<Encoder>> =
+    LazyLock::new(|| CHARMAPS.iter().map(|(_, table)| Encoder::new(table)).collect());
 
 /// Encode text with the single-byte codec at `index` in the tables.
 pub(crate) fn encode_charmap(text: &str, index: usize) -> Option<Vec<u8>> {
-    let table = &CHARMAPS[index].1;
     let encoder = &ENCODERS[index];
     let mut out = Vec::with_capacity(text.len());
     for ch in text.chars() {
-        let cp = ch as u32;
-        if cp < 0x80 && table[cp as usize] == cp {
-            out.push(cp as u8);
-        } else {
-            out.push(*encoder.get(&ch)?);
-        }
+        out.push(encoder.encode(ch)?);
     }
     Some(out)
 }
@@ -149,7 +175,7 @@ pub fn decode_utf8_variants(bytes: &[u8]) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            0xC0 if bytes.get(i + 1) == Some(&0x80) => {
+            0xC0 if bytes.get(i + 1) == Some(&0x80) || &bytes[i..] == b"\xC0\n" => {
                 out.push_str(std::str::from_utf8(&bytes[start..i]).ok()?);
                 out.push('\0');
                 i += 2;
@@ -174,6 +200,11 @@ pub fn decode_utf8_variants(bytes: &[u8]) -> Option<String> {
     Some(out)
 }
 
+// Python ftfy finds these sequences with regexes that allow `$` in place of
+// each byte after the first, meant for input that's cut off. But in Python,
+// `$` also matches before a newline at the very end, so when the input ends
+// in the first 5 bytes of a CESU-8 pair plus "\n", or in "\xC0\n", the
+// newline is taken as the last byte of the sequence. We do the same.
 fn is_cesu8_pair(b: &[u8]) -> bool {
     b.len() >= 6
         && b[0] == 0xED
@@ -181,5 +212,45 @@ fn is_cesu8_pair(b: &[u8]) -> bool {
         && (0x80..=0xBF).contains(&b[2])
         && b[3] == 0xED
         && (0xB0..=0xBF).contains(&b[4])
-        && (0x80..=0xBF).contains(&b[5])
+        && ((0x80..=0xBF).contains(&b[5]) || b.len() == 6 && b[5] == b'\n')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_variants_trailing_newline_quirk() {
+        // As in Python ftfy, a final newline is eaten as part of the sequence.
+        let decode = |b: &[u8]| decode_utf8_variants(b);
+        assert_eq!(decode(b"\xed\xa0\xbd\xed\xb8\n").as_deref(), Some("\u{1F60A}"));
+        assert_eq!(decode(b"null\xc0\n").as_deref(), Some("null\0"));
+        // But only at the very end.
+        assert_eq!(decode(b"\xed\xa0\xbd\xed\xb8\nx"), None);
+        assert_eq!(decode(b"\xc0\nx"), None);
+    }
+
+    #[test]
+    fn charmaps_never_map_two_bytes_to_one_char() {
+        // The encoders rely on this: otherwise which byte a character
+        // encodes to would depend on table order.
+        for (name, table) in CHARMAPS.iter() {
+            let mut seen = std::collections::HashSet::new();
+            for &cp in table.iter().filter(|&&cp| cp != NO_CHAR) {
+                assert!(seen.insert(cp), "{name} maps two bytes to U+{cp:04X}");
+            }
+        }
+    }
+
+    #[test]
+    fn encoders_round_trip() {
+        for (index, (name, table)) in CHARMAPS.iter().enumerate() {
+            for (byte, &cp) in table.iter().enumerate() {
+                if let Some(ch) = char::from_u32(cp) {
+                    let encoded = encode_charmap(ch.encode_utf8(&mut [0; 4]), index);
+                    assert_eq!(encoded, Some(vec![byte as u8]), "{name} byte {byte:02X}");
+                }
+            }
+        }
+    }
 }

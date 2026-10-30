@@ -5,6 +5,9 @@
 //! common case of clean text doesn't allocate.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 use regex::bytes::Regex as BytesRegex;
@@ -350,14 +353,36 @@ static LOSSY_UTF8_RE: LazyLock<BytesRegex> = LazyLock::new(|| {
 /// Replace UTF-8 sequences where information was lost in a "sloppy" codec
 /// (marked by byte 1A, or sometimes '?') with the UTF-8 encoding of U+FFFD.
 pub fn replace_lossy_sequences(bytes: &[u8]) -> Vec<u8> {
-    LOSSY_UTF8_RE
-        .replace_all(bytes, &b"\xEF\xBF\xBD"[..])
-        .into_owned()
+    replace_lossy_sequences_cow(bytes).into_owned()
+}
+
+pub(crate) fn replace_lossy_sequences_cow(bytes: &[u8]) -> Cow<'_, [u8]> {
+    LOSSY_UTF8_RE.replace_all(bytes, &b"\xEF\xBF\xBD"[..])
 }
 
 static UTF8_DETECTOR_RE: LazyLock<Regex> = LazyLock::new(|| build(UTF8_DETECTOR_PATTERN));
 static UTF8_DETECTOR_LOOKBEHIND_RE: LazyLock<Regex> =
     LazyLock::new(|| build(&format!(r"\A(?:{UTF8_DETECTOR_LOOKBEHIND})\z")));
+
+// The lookbehind class tested ahead of time for every character below this,
+// which covers all of its members.
+const LOOKBEHIND_TABLE_LEN: usize = 0x2600;
+static UTF8_DETECTOR_LOOKBEHIND_TABLE: LazyLock<Vec<bool>> = LazyLock::new(|| {
+    (0..LOOKBEHIND_TABLE_LEN as u32)
+        .map(|cp| char::from_u32(cp).is_some_and(lookbehind_regex_matches))
+        .collect()
+});
+
+fn lookbehind_regex_matches(ch: char) -> bool {
+    UTF8_DETECTOR_LOOKBEHIND_RE.is_match(ch.encode_utf8(&mut [0; 4]))
+}
+
+fn blocks_utf8_detector(ch: char) -> bool {
+    match UTF8_DETECTOR_LOOKBEHIND_TABLE.get(ch as usize) {
+        Some(&blocked) => blocked,
+        None => lookbehind_regex_matches(ch),
+    }
+}
 
 /// Find matches of Python's UTF8_DETECTOR_RE, including its negative
 /// lookbehind, which the regex crate can't express.
@@ -368,11 +393,7 @@ fn utf8_detector_matches(text: &str) -> impl Iterator<Item = (usize, usize)> + '
             let m = UTF8_DETECTOR_RE.find_at(text, pos)?;
             let start = m.start();
             let prev = text[..start].chars().next_back();
-            let blocked = prev.is_some_and(|ch| {
-                let mut buf = [0; 4];
-                UTF8_DETECTOR_LOOKBEHIND_RE.is_match(ch.encode_utf8(&mut buf))
-            });
-            if blocked {
+            if prev.is_some_and(blocks_utf8_detector) {
                 pos = start + text[start..].chars().next().map_or(1, char::len_utf8);
                 continue;
             }
@@ -383,8 +404,41 @@ fn utf8_detector_matches(text: &str) -> impl Iterator<Item = (usize, usize)> + '
     })
 }
 
-pub(crate) fn has_utf8_mojibake(text: &str) -> bool {
+#[doc(hidden)]
+pub fn has_utf8_mojibake(text: &str) -> bool {
     utf8_detector_matches(text).next().is_some()
+}
+
+/// The same few mojibake sequences (like "â€™") tend to recur throughout a
+/// text, so the fixes for short ones are remembered per thread.
+const MEMO_MAX_LEN: usize = 64;
+const MEMO_MAX_ENTRIES: usize = 4096;
+
+thread_local! {
+    static EMBEDDED_MOJIBAKE_MEMO: RefCell<HashMap<Box<str>, Option<Rc<str>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Fix one sequence found by the UTF-8 detector, or None to leave it alone.
+fn fix_embedded_mojibake(substr: &str) -> Option<Rc<str>> {
+    let compute = || {
+        is_bad(substr).then(|| Rc::from(fix_encoding(substr, &TextFixerConfig::no_explain())))
+    };
+    if substr.len() > MEMO_MAX_LEN {
+        return compute();
+    }
+    EMBEDDED_MOJIBAKE_MEMO.with(|memo| {
+        if let Some(fixed) = memo.borrow().get(substr) {
+            return fixed.clone();
+        }
+        let fixed = compute();
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= MEMO_MAX_ENTRIES {
+            memo.clear();
+        }
+        memo.insert(substr.into(), fixed.clone());
+        fixed
+    })
 }
 
 /// Fix sequences that distinctly look like UTF-8 mojibake, even when there's
@@ -395,12 +449,13 @@ pub fn decode_inconsistent_utf8(text: &str) -> Cow<'_, str> {
     for (start, end) in utf8_detector_matches(text) {
         let substr = &text[start..end];
         // Require the match to be shorter, so that this doesn't recurse forever
-        if substr.len() < text.len() && is_bad(substr) {
-            let fixed = fix_encoding(substr, &TextFixerConfig::no_explain());
-            let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
-            out.push_str(&text[last..start]);
-            out.push_str(&fixed);
-            last = end;
+        if substr.len() < text.len() {
+            if let Some(fixed) = fix_embedded_mojibake(substr) {
+                let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                out.push_str(&text[last..start]);
+                out.push_str(&fixed);
+                last = end;
+            }
         }
     }
     match out {

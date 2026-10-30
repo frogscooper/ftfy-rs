@@ -275,6 +275,20 @@ fn possible_encoding(text: &Bound<'_, PyString>, encoding: &str) -> PyResult<boo
         .ok_or_else(|| PyKeyError::new_err(encoding.to_string()))
 }
 
+/// Characters whose normalization an older Unicode version could disagree
+/// with, if it doesn't have them.
+#[pyfunction]
+fn _normalization_candidates() -> Vec<char> {
+    ftfy_rs::normalize::candidates()
+}
+
+/// Tell normalization which characters the running Python's `unicodedata`
+/// doesn't know, so it can leave them alone as Python does.
+#[pyfunction]
+fn _set_unassigned(chars: Vec<char>) -> bool {
+    ftfy_rs::normalize::set_unassigned(chars)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fix_text, m)?)?;
@@ -297,5 +311,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(badness, m)?)?;
     m.add_function(wrap_pyfunction!(is_bad, m)?)?;
     m.add_function(wrap_pyfunction!(possible_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(_normalization_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(_set_unassigned, m)?)?;
     Ok(())
 }

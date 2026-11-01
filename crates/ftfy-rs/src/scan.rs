@@ -110,7 +110,12 @@ mod tests {
                 }
             }
             if bits & ABOVE_U0300 == 0 {
-                assert_eq!(crate::normalize(&s, Normalization::Nfc), s, "U+{:04X}", ch as u32);
+                assert_eq!(
+                    crate::normalize(&s, Normalization::Nfc),
+                    s,
+                    "U+{:04X}",
+                    ch as u32
+                );
             }
             assert_eq!(bits & NON_ASCII != 0, !ch.is_ascii());
         }

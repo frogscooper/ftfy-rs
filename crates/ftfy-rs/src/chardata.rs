@@ -138,8 +138,12 @@ impl Encoder {
     }
 }
 
-static ENCODERS: LazyLock<Vec<Encoder>> =
-    LazyLock::new(|| CHARMAPS.iter().map(|(_, table)| Encoder::new(table)).collect());
+static ENCODERS: LazyLock<Vec<Encoder>> = LazyLock::new(|| {
+    CHARMAPS
+        .iter()
+        .map(|(_, table)| Encoder::new(table))
+        .collect()
+});
 
 /// Encode text with the single-byte codec at `index` in the tables.
 pub(crate) fn encode_charmap(text: &str, index: usize) -> Option<Vec<u8>> {
@@ -223,7 +227,10 @@ mod tests {
     fn utf8_variants_trailing_newline_quirk() {
         // As in Python ftfy, a final newline is eaten as part of the sequence.
         let decode = |b: &[u8]| decode_utf8_variants(b);
-        assert_eq!(decode(b"\xed\xa0\xbd\xed\xb8\n").as_deref(), Some("\u{1F60A}"));
+        assert_eq!(
+            decode(b"\xed\xa0\xbd\xed\xb8\n").as_deref(),
+            Some("\u{1F60A}")
+        );
         assert_eq!(decode(b"null\xc0\n").as_deref(), Some("null\0"));
         // But only at the very end.
         assert_eq!(decode(b"\xed\xa0\xbd\xed\xb8\nx"), None);

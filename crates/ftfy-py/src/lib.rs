@@ -21,11 +21,17 @@ struct Text<'a> {
 
 fn extract_text<'a>(s: &'a Bound<'_, PyString>) -> PyResult<Text<'a>> {
     if let Ok(text) = s.to_str() {
-        return Ok(Text { text: Cow::Borrowed(text), escaped: false });
+        return Ok(Text {
+            text: Cow::Borrowed(text),
+            escaped: false,
+        });
     }
     let encoded = s.call_method1("encode", ("utf-8", "surrogatepass"))?;
     let bytes = encoded.downcast::<PyBytes>()?.as_bytes();
-    Ok(Text { text: Cow::Owned(escape_surrogates(bytes)), escaped: true })
+    Ok(Text {
+        text: Cow::Owned(escape_surrogates(bytes)),
+        escaped: true,
+    })
 }
 
 fn escape_surrogates(bytes: &[u8]) -> String {
@@ -74,13 +80,19 @@ fn to_python<'py>(py: Python<'py>, text: &str, escaped: bool) -> PyResult<Bound<
 /// Read a Python TextFixerConfig (a namedtuple) into a Rust config.
 fn parse_config(config: Option<&Bound<'_, PyAny>>, explain: bool) -> PyResult<TextFixerConfig> {
     let Some(config) = config else {
-        return Ok(TextFixerConfig { explain, ..Default::default() });
+        return Ok(TextFixerConfig {
+            explain,
+            ..Default::default()
+        });
     };
     let field = |i: usize| config.get_item(i);
     let flag = |i: usize| field(i)?.is_truthy();
 
     let unescape = field(0)?;
-    let unescape_html = if unescape.downcast::<PyString>().is_ok_and(|s| s.to_str().ok() == Some("auto")) {
+    let unescape_html = if unescape
+        .downcast::<PyString>()
+        .is_ok_and(|s| s.to_str().ok() == Some("auto"))
+    {
         UnescapeHtml::Auto
     } else if unescape.is_truthy()? {
         UnescapeHtml::Always
@@ -185,7 +197,9 @@ fn fix_encoding_and_explain<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, Steps)> {
     let t = extract_text(text)?;
     let config = parse_config(config, true)?;
-    let (fixed, steps) = run(py, &t.text, |s| ftfy_rs::fix_encoding_and_explain(s, &config));
+    let (fixed, steps) = run(py, &t.text, |s| {
+        ftfy_rs::fix_encoding_and_explain(s, &config)
+    });
     Ok((to_python(py, &fixed, t.escaped)?, steps_to_tuples(steps)))
 }
 
@@ -239,7 +253,10 @@ text_fixers!(
 );
 
 #[pyfunction]
-fn fix_surrogates<'py>(py: Python<'py>, text: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyAny>> {
+fn fix_surrogates<'py>(
+    py: Python<'py>,
+    text: &Bound<'py, PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
     // Without escaped surrogates in the input there's nothing to fix, and
     // afterwards none are left, so characters in the escape range are real.
     let t = extract_text(text)?;

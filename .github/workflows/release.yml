@@ -1,0 +1,207 @@
+# Build wheels and an sdist, test the wheels, and publish to PyPI.
+#
+# - Pushing a tag like v0.1.0 builds, tests and publishes.
+# - Running it by hand (workflow_dispatch) builds and tests without publishing,
+#   as a dry run.
+#
+# Publishing uses PyPI trusted publishing, so no token is stored here. It needs
+# a one-time setup on pypi.org (see RELEASING.md) and a GitHub environment
+# named "pypi".
+#
+# Adapted from `maturin generate-ci github` (maturin 1.16).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Every CPython that gets a wheel. --find-interpreter builds for each one
+  # it can find, so the macOS and Windows jobs install them all.
+  PYTHONS: |
+    3.9
+    3.10
+    3.11
+    3.12
+    3.13
+    3.14
+
+jobs:
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-24.04
+            target: x86_64
+            manylinux: auto
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: auto
+          - runner: ubuntu-24.04
+            target: x86_64
+            manylinux: musllinux_1_2
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.platform.manylinux }}-${{ matrix.platform.target }}
+          path: dist
+      - uses: actions/setup-python@v6
+        if: matrix.platform.manylinux == 'auto'
+        with:
+          python-version: "3.13"
+      - name: Test the wheel
+        if: matrix.platform.manylinux == 'auto'
+        shell: bash
+        run: |
+          set -e
+          python -m venv /tmp/venv
+          source /tmp/venv/bin/activate
+          pip install pytest ftfy==6.3.1
+          pip install ftfy-rs --no-index --find-links dist
+          pytest tests -q -p no:cacheprovider
+      - name: Test the wheel (musl)
+        if: matrix.platform.manylinux == 'musllinux_1_2'
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/io -w /io alpine:latest sh -c '
+            set -e
+            apk add python3 py3-virtualenv
+            python3 -m virtualenv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install pytest ftfy==6.3.1
+            pip install ftfy-rs --no-index --find-links dist
+            pytest tests -q -p no:cacheprovider
+          '
+
+  windows:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+            python_arch: x64
+            pythons: |
+              3.9
+              3.10
+              3.11
+              3.12
+              3.13
+              3.14
+          # Windows on Arm has no CPython builds before 3.11.
+          - runner: windows-11-arm
+            target: aarch64
+            python_arch: arm64
+            pythons: |
+              3.11
+              3.12
+              3.13
+              3.14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.platform.pythons }}
+          architecture: ${{ matrix.platform.python_arch }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-windows-${{ matrix.platform.target }}
+          path: dist
+      - name: Test the wheel
+        shell: bash
+        run: |
+          set -e
+          python -m venv venv-test
+          source venv-test/Scripts/activate
+          pip install pytest ftfy==6.3.1
+          pip install ftfy-rs --no-index --find-links dist
+          pytest tests -q -p no:cacheprovider
+
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-latest
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHONS }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
+      - name: Test the wheel
+        run: |
+          set -e
+          python -m venv /tmp/venv
+          source /tmp/venv/bin/activate
+          pip install pytest ftfy==6.3.1
+          pip install ftfy-rs --no-index --find-links dist
+          pytest tests -q -p no:cacheprovider
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos, sdist]
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ftfy-rs/
+    permissions:
+      # Trusted publishing, and attestations for the uploaded files.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1

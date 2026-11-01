@@ -16,8 +16,7 @@ use regex::{Captures, Regex};
 use crate::badness::{build, is_bad};
 use crate::chardata::sloppy_1252_char;
 use crate::tables::{
-    HTML_ENTITIES, LIGATURES, UTF8_DETECTOR_LOOKBEHIND, UTF8_DETECTOR_PATTERN,
-    WIDTH_MAP,
+    HTML_ENTITIES, LIGATURES, UTF8_DETECTOR_LOOKBEHIND, UTF8_DETECTOR_PATTERN, WIDTH_MAP,
 };
 use crate::{fix_encoding, TextFixerConfig};
 
@@ -80,7 +79,8 @@ fn unescape_numeric(entity: &str) -> Option<String> {
         return None;
     }
     let num = digits.chars().fold(0u32, |acc, c| {
-        acc.saturating_mul(radix).saturating_add(c.to_digit(radix).unwrap())
+        acc.saturating_mul(radix)
+            .saturating_add(c.to_digit(radix).unwrap())
     });
     let replacement = html_charref(num);
     if replacement.contains(';') {
@@ -219,16 +219,14 @@ pub fn fix_escaped_surrogates(text: &str) -> Cow<'_, str> {
     while let Some(ch) = chars.next() {
         match escaped_surrogate(ch) {
             None => out.push(ch),
-            Some(hi @ 0xD800..=0xDBFF) => {
-                match chars.peek().copied().and_then(escaped_surrogate) {
-                    Some(lo @ 0xDC00..=0xDFFF) => {
-                        chars.next();
-                        let cp = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00);
-                        out.push(char::from_u32(cp).unwrap());
-                    }
-                    _ => out.push('\u{FFFD}'),
+            Some(hi @ 0xD800..=0xDBFF) => match chars.peek().copied().and_then(escaped_surrogate) {
+                Some(lo @ 0xDC00..=0xDFFF) => {
+                    chars.next();
+                    let cp = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00);
+                    out.push(char::from_u32(cp).unwrap());
                 }
-            }
+                _ => out.push('\u{FFFD}'),
+            },
             Some(_) => out.push('\u{FFFD}'),
         }
     }
@@ -421,9 +419,8 @@ thread_local! {
 
 /// Fix one sequence found by the UTF-8 detector, or None to leave it alone.
 fn fix_embedded_mojibake(substr: &str) -> Option<Rc<str>> {
-    let compute = || {
-        is_bad(substr).then(|| Rc::from(fix_encoding(substr, &TextFixerConfig::no_explain())))
-    };
+    let compute =
+        || is_bad(substr).then(|| Rc::from(fix_encoding(substr, &TextFixerConfig::no_explain())));
     if substr.len() > MEMO_MAX_LEN {
         return compute();
     }

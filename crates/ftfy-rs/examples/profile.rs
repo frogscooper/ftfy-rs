@@ -36,32 +36,122 @@ fn time(cases: &[String], f: impl Fn(&str)) -> Duration {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: profile <corpus.bin>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: profile <corpus.bin>");
     let cases = load(&path);
-    let bad: Vec<String> = cases.iter().filter(|s| ftfy_rs::is_bad(s)).cloned().collect();
+    let bad: Vec<String> = cases
+        .iter()
+        .filter(|s| ftfy_rs::is_bad(s))
+        .cloned()
+        .collect();
     let config = TextFixerConfig::no_explain();
     let explain = TextFixerConfig::default();
-    println!("{} cases, {} of them look bad
-", cases.len(), bad.len());
+    println!("{} cases, {} of them look bad\n", cases.len(), bad.len());
 
     let rows: Vec<(&str, Duration)> = vec![
-        ("fix_text", time(&cases, |s| { black_box(ftfy_rs::fix_text(s, &config)); })),
-        ("fix_and_explain", time(&cases, |s| { black_box(ftfy_rs::fix_and_explain(s, &explain)); })),
-        ("fix_encoding", time(&cases, |s| { black_box(ftfy_rs::fix_encoding(s, &config)); })),
-        ("fix_encoding (bad only)", time(&bad, |s| { black_box(ftfy_rs::fix_encoding(s, &config)); })),
-        ("is_bad", time(&cases, |s| { black_box(ftfy_rs::is_bad(s)); })),
-        ("possible_encodings", time(&cases, |s| { black_box(ftfy_rs::chardata::possible_encodings(s)); })),
-        ("has_utf8_mojibake", time(&cases, |s| { black_box(fixes::has_utf8_mojibake(s)); })),
-        ("decode_inconsistent_utf8", time(&cases, |s| { black_box(fixes::decode_inconsistent_utf8(s)); })),
-        ("unescape_html", time(&cases, |s| { black_box(fixes::unescape_html(s)); })),
-        ("fix_c1_controls", time(&cases, |s| { black_box(fixes::fix_c1_controls(s)); })),
-        ("fix_latin_ligatures", time(&cases, |s| { black_box(fixes::fix_latin_ligatures(s)); })),
-        ("fix_character_width", time(&cases, |s| { black_box(fixes::fix_character_width(s)); })),
-        ("uncurl_quotes", time(&cases, |s| { black_box(fixes::uncurl_quotes(s)); })),
-        ("fix_line_breaks", time(&cases, |s| { black_box(fixes::fix_line_breaks(s)); })),
-        ("remove_terminal_escapes", time(&cases, |s| { black_box(fixes::remove_terminal_escapes(s)); })),
-        ("remove_control_chars", time(&cases, |s| { black_box(fixes::remove_control_chars(s)); })),
-        ("normalize NFC", time(&cases, |s| { black_box(ftfy_rs::normalize(s, Normalization::Nfc)); })),
+        (
+            "fix_text",
+            time(&cases, |s| {
+                black_box(ftfy_rs::fix_text(s, &config));
+            }),
+        ),
+        (
+            "fix_and_explain",
+            time(&cases, |s| {
+                black_box(ftfy_rs::fix_and_explain(s, &explain));
+            }),
+        ),
+        (
+            "fix_encoding",
+            time(&cases, |s| {
+                black_box(ftfy_rs::fix_encoding(s, &config));
+            }),
+        ),
+        (
+            "fix_encoding (bad only)",
+            time(&bad, |s| {
+                black_box(ftfy_rs::fix_encoding(s, &config));
+            }),
+        ),
+        (
+            "is_bad",
+            time(&cases, |s| {
+                black_box(ftfy_rs::is_bad(s));
+            }),
+        ),
+        (
+            "possible_encodings",
+            time(&cases, |s| {
+                black_box(ftfy_rs::chardata::possible_encodings(s));
+            }),
+        ),
+        (
+            "has_utf8_mojibake",
+            time(&cases, |s| {
+                black_box(fixes::has_utf8_mojibake(s));
+            }),
+        ),
+        (
+            "decode_inconsistent_utf8",
+            time(&cases, |s| {
+                black_box(fixes::decode_inconsistent_utf8(s));
+            }),
+        ),
+        (
+            "unescape_html",
+            time(&cases, |s| {
+                black_box(fixes::unescape_html(s));
+            }),
+        ),
+        (
+            "fix_c1_controls",
+            time(&cases, |s| {
+                black_box(fixes::fix_c1_controls(s));
+            }),
+        ),
+        (
+            "fix_latin_ligatures",
+            time(&cases, |s| {
+                black_box(fixes::fix_latin_ligatures(s));
+            }),
+        ),
+        (
+            "fix_character_width",
+            time(&cases, |s| {
+                black_box(fixes::fix_character_width(s));
+            }),
+        ),
+        (
+            "uncurl_quotes",
+            time(&cases, |s| {
+                black_box(fixes::uncurl_quotes(s));
+            }),
+        ),
+        (
+            "fix_line_breaks",
+            time(&cases, |s| {
+                black_box(fixes::fix_line_breaks(s));
+            }),
+        ),
+        (
+            "remove_terminal_escapes",
+            time(&cases, |s| {
+                black_box(fixes::remove_terminal_escapes(s));
+            }),
+        ),
+        (
+            "remove_control_chars",
+            time(&cases, |s| {
+                black_box(fixes::remove_control_chars(s));
+            }),
+        ),
+        (
+            "normalize NFC",
+            time(&cases, |s| {
+                black_box(ftfy_rs::normalize(s, Normalization::Nfc));
+            }),
+        ),
     ];
     for (name, per_case) in rows {
         println!("{name:26} {:8.3} us", per_case.as_secs_f64() * 1e6);
@@ -75,5 +165,8 @@ fn main() {
         runs += 1;
     }
     let mb = document.len() as f64 / 1e6;
-    println!("\n{mb:.1} MB document: {:.1} MB/s", mb * runs as f64 / start.elapsed().as_secs_f64());
+    println!(
+        "\n{mb:.1} MB document: {:.1} MB/s",
+        mb * runs as f64 / start.elapsed().as_secs_f64()
+    );
 }

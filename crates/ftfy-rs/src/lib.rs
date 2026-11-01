@@ -20,13 +20,16 @@ pub mod chardata;
 pub mod fixes;
 pub mod normalize;
 mod scan;
+#[rustfmt::skip]
 mod tables;
 
 pub use badness::{badness, is_bad};
 pub use chardata::{decode_utf8_variants, possible_encoding, CHARMAP_ENCODINGS};
 pub use normalize::normalize;
 
-use chardata::{decode_charmap, encode_charmap, has_bit, possible_encodings, LATIN_1, WINDOWS_1252};
+use chardata::{
+    decode_charmap, encode_charmap, has_bit, possible_encodings, LATIN_1, WINDOWS_1252,
+};
 
 /// When to decode HTML entities such as `&amp;`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,7 +213,13 @@ pub fn fix_and_explain(
         let mut bits = scan::scan(&text);
 
         if config.unescape_html != UnescapeHtml::Never && bits & scan::AMPERSAND != 0 {
-            try_fix(&mut text, &mut bits, fixes::unescape_html, "unescape_html", &mut steps);
+            try_fix(
+                &mut text,
+                &mut bits,
+                fixes::unescape_html,
+                "unescape_html",
+                &mut steps,
+            );
         }
 
         if config.fix_encoding && bits & scan::NON_ASCII != 0 {
@@ -232,11 +241,36 @@ pub fn fix_and_explain(
         }
 
         let fixers: [(bool, u16, Fixer, &str); 8] = [
-            (config.fix_c1_controls, scan::C1_CONTROL, fixes::fix_c1_controls, "fix_c1_controls"),
-            (config.fix_latin_ligatures, scan::LIGATURE, fixes::fix_latin_ligatures, "fix_latin_ligatures"),
-            (config.fix_character_width, scan::WIDTH, fixes::fix_character_width, "fix_character_width"),
-            (config.uncurl_quotes, scan::CURLY_QUOTE, fixes::uncurl_quotes, "uncurl_quotes"),
-            (config.fix_line_breaks, scan::LINE_BREAK, fixes::fix_line_breaks, "fix_line_breaks"),
+            (
+                config.fix_c1_controls,
+                scan::C1_CONTROL,
+                fixes::fix_c1_controls,
+                "fix_c1_controls",
+            ),
+            (
+                config.fix_latin_ligatures,
+                scan::LIGATURE,
+                fixes::fix_latin_ligatures,
+                "fix_latin_ligatures",
+            ),
+            (
+                config.fix_character_width,
+                scan::WIDTH,
+                fixes::fix_character_width,
+                "fix_character_width",
+            ),
+            (
+                config.uncurl_quotes,
+                scan::CURLY_QUOTE,
+                fixes::uncurl_quotes,
+                "uncurl_quotes",
+            ),
+            (
+                config.fix_line_breaks,
+                scan::LINE_BREAK,
+                fixes::fix_line_breaks,
+                "fix_line_breaks",
+            ),
             (
                 config.fix_surrogates && config.surrogates_escaped,
                 scan::ESCAPED_SURROGATE,
@@ -249,7 +283,12 @@ pub fn fix_and_explain(
                 fixes::remove_terminal_escapes,
                 "remove_terminal_escapes",
             ),
-            (config.remove_control_chars, scan::CONTROL, fixes::remove_control_chars, "remove_control_chars"),
+            (
+                config.remove_control_chars,
+                scan::CONTROL,
+                fixes::remove_control_chars,
+                "remove_control_chars",
+            ),
         ];
         for (enabled, bit, fixer, name) in fixers {
             if enabled && bits & bit != 0 {

@@ -36,17 +36,17 @@ Windows 11, Python 3.13, `python bench/bench.py`:
 
 Long texts are fixed with the GIL released, so threads scale. `import ftfy_rs` takes about 35 ms, against 98 ms for ftfy.
 
-To see where the Rust side spends its time, run `cargo run --release --example profile -- corpus.bin` (see [`bench/dump_corpus.py`](bench/dump_corpus.py)).
+To see where the Rust side spends its time, run `cargo run --release --example profile -- corpus.bin` (see [`bench/dump_corpus.py`](https://github.com/frogscooper/ftfy-rs/blob/master/bench/dump_corpus.py)).
 
 ## How it stays faithful
 
-ftfy's behavior lives mostly in a few big regexes and lookup tables. Rather than transcribing ~400 characters by hand, [`scripts/gen_tables.py`](scripts/gen_tables.py) generates [`tables.rs`](crates/ftfy-rs/src/tables.rs) from the installed ftfy:
+ftfy's behavior lives mostly in a few big regexes and lookup tables. Rather than transcribing ~400 characters by hand, [`scripts/gen_tables.py`](https://github.com/frogscooper/ftfy-rs/blob/master/scripts/gen_tables.py) generates [`tables.rs`](https://github.com/frogscooper/ftfy-rs/blob/master/crates/ftfy-rs/src/tables.rs) from the installed ftfy:
 
 - Python regexes are compiled to Rust `regex` syntax by walking their parsed form (`re._parser`), with Python's Unicode-aware `\w`/`\s`/`\d` expanded to the exact codepoint sets Python uses. Rust's definitions differ.
 - Codec tables, HTML entities, the width map and ligatures are dumped directly.
 - The one negative lookbehind (in `UTF8_DETECTOR_RE`) is applied by hand, since the `regex` crate has no lookaround.
 
-The pipeline in [`lib.rs`](crates/ftfy-rs/src/lib.rs) then follows ftfy step by step, **quirks included**. ftfy does each of these, so ftfy-rs does too:
+The pipeline in [`lib.rs`](https://github.com/frogscooper/ftfy-rs/blob/master/crates/ftfy-rs/src/lib.rs) then follows ftfy step by step, **quirks included**. ftfy does each of these, so ftfy-rs does too:
 
 - `fix_text` ignores the `restore_byte_a0`/`replace_lossy_sequences`/... sub-options unless `explain=True`.
 - `unescape_html="auto"` stays off for every later line once one line contains `<`.

@@ -5,9 +5,10 @@ use std::borrow::Cow;
 
 use ftfy_rs::fixes::{self, SURROGATE_ESCAPE_BASE};
 use ftfy_rs::{ExplanationStep, Normalization, TextFixerConfig, UnescapeHtml};
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyUnicodeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString};
+use pyo3::types::{PyBytes, PyList, PyString};
+use rayon::prelude::*;
 
 /// Texts longer than this are fixed with the GIL released.
 const RELEASE_GIL_LEN: usize = 4096;
@@ -155,8 +156,82 @@ fn fix_text<'py>(
     let t = extract_text(text)?;
     let mut config = parse_config(config, false)?;
     config.surrogates_escaped = t.escaped;
-    let fixed = run(py, &t.text, |s| ftfy_rs::fix_text(s, &config));
-    to_python(py, &fixed, t.escaped && !config.fix_surrogates)
+    match run(py, &t.text, |s| fix_text_changed(s, &config)) {
+        // Unchanged text comes back as the same object, without a copy.
+        None => Ok(text.clone().into_any()),
+        Some(fixed) => to_python(py, &fixed, t.escaped && !config.fix_surrogates),
+    }
+}
+
+/// The fixed text, or None if fixing leaves it unchanged.
+fn fix_text_changed(text: &str, config: &TextFixerConfig) -> Option<String> {
+    match ftfy_rs::fix_text_cow(text, config) {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(fixed) => Some(fixed),
+    }
+}
+
+/// Batches with less text than this are fixed on the calling thread, where
+/// handing work to other threads would cost more than it saves.
+const PARALLEL_MIN_LEN: usize = 64 * 1024;
+
+/// Fix many texts at once, in parallel, with the GIL released. Equivalent to
+/// `[fix_text(t, config) for t in texts]`.
+#[pyfunction]
+#[pyo3(signature = (texts, config=None))]
+fn fix_texts<'py>(
+    py: Python<'py>,
+    texts: &Bound<'py, PyAny>,
+    config: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyList>> {
+    let config = parse_config(config, false)?;
+    let mut strings = Vec::new();
+    for (i, item) in texts.try_iter()?.enumerate() {
+        let item = item?;
+        match item.downcast_into::<PyString>() {
+            Ok(s) => strings.push(s),
+            Err(err) => {
+                let item = err.into_inner();
+                let kind = item.get_type().name()?;
+                return Err(if item.is_instance_of::<PyBytes>() {
+                    PyUnicodeError::new_err(format!(
+                        "fix_texts got bytes at index {i}; decode them to str first"
+                    ))
+                } else {
+                    PyTypeError::new_err(format!("fix_texts expects str, got {kind} at index {i}"))
+                });
+            }
+        }
+    }
+    let texts = strings
+        .iter()
+        .map(extract_text)
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let fix_one = |t: &Text| {
+        let config = TextFixerConfig {
+            surrogates_escaped: t.escaped,
+            ..config.clone()
+        };
+        fix_text_changed(&t.text, &config)
+    };
+    let total_len: usize = texts.iter().map(|t| t.text.len()).sum();
+    let fixed: Vec<Option<String>> = if total_len < PARALLEL_MIN_LEN {
+        texts.iter().map(fix_one).collect()
+    } else {
+        py.allow_threads(|| texts.par_iter().map(fix_one).collect())
+    };
+
+    let out = PyList::empty(py);
+    for ((original, t), fixed) in strings.iter().zip(&texts).zip(fixed) {
+        match fixed {
+            None => out.append(original)?,
+            Some(fixed) => {
+                out.append(to_python(py, &fixed, t.escaped && !config.fix_surrogates)?)?
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[pyfunction]
@@ -309,6 +384,7 @@ fn _set_unassigned(chars: Vec<char>) -> bool {
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fix_text, m)?)?;
+    m.add_function(wrap_pyfunction!(fix_texts, m)?)?;
     m.add_function(wrap_pyfunction!(fix_text_segment, m)?)?;
     m.add_function(wrap_pyfunction!(fix_and_explain, m)?)?;
     m.add_function(wrap_pyfunction!(fix_encoding_and_explain, m)?)?;

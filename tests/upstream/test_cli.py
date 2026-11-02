@@ -1,5 +1,6 @@
-# Ported from Python ftfy 6.3.1 (Apache-2.0): runs the ftfy_rs CLI module instead of
-# the `ftfy` command, with UTF-8 output forced so it works on Windows.
+# Ported from Python ftfy 6.3.1 (Apache-2.0): runs both the ftfy_rs Python CLI
+# module and the native ftfy-rs binary instead of the `ftfy` command, with
+# UTF-8 output forced so it works on Windows.
 import os
 import subprocess
 import sys
@@ -26,10 +27,30 @@ FAILED_OUTPUT = os.linesep.join(
 )
 
 
-# Run the CLI module with this interpreter, and have it write UTF-8 even when
-# Windows would default to a legacy code page for a pipe.
-FTFY = [sys.executable, "-m", "ftfy_rs.cli"]
+# The Python CLI module, run with this interpreter, and the native binary,
+# found at $FTFY_RS_BIN or built by `cargo build --release`. Python is told
+# to write UTF-8 even where Windows would use a legacy code page for a pipe.
+ROOT = THIS_DIR.parent.parent
+NATIVE_BIN = Path(
+    os.environ.get("FTFY_RS_BIN")
+    or ROOT / "target" / "release" / ("ftfy-rs.exe" if os.name == "nt" else "ftfy-rs")
+)
+COMMANDS = {
+    "python": [sys.executable, "-m", "ftfy_rs.cli"],
+    "native": [str(NATIVE_BIN)],
+}
 ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+FTFY = COMMANDS["python"]
+
+
+@pytest.fixture(autouse=True, params=list(COMMANDS))
+def command(request):
+    global FTFY
+    if request.param == "native" and not NATIVE_BIN.exists():
+        pytest.skip(f"native binary not built: {NATIVE_BIN}")
+    FTFY = COMMANDS[request.param]
+    yield request.param
+    FTFY = COMMANDS["python"]
 
 
 def get_command_output(args, stdin=None):

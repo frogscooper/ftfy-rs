@@ -14,3 +14,4 @@ crate-type = ["cdylib"]
 [dependencies]
 ftfy-rs = { path = "../ftfy-rs" }
 pyo3 = { version = "0.25", features = ["extension-module"] }
+rayon = "1"

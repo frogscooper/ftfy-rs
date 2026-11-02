@@ -49,6 +49,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and install
         run: pip install .[test]
+      - name: Build the native CLI
+        # Tested against ftfy's own command in tests/test_cli_parity.py.
+        run: cargo build --release --bin ftfy-rs
       - name: Test
         # Run against the installed package, not the source tree.
         run: python -m pytest tests -q -p no:cacheprovider

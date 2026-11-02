@@ -7,6 +7,7 @@ Usage:  python bench/bench.py
 from __future__ import annotations
 
 import json
+import os
 import platform
 import sys
 import time
@@ -86,6 +87,29 @@ def main():
         f"{f'{size_mb:.1f} MB document':24} {size_mb / py:7.2f} MB/s {size_mb / rs:7.2f} MB/s"
         f" {py / rs:8.1f}x"
     )
+
+    batch_benchmark()
+
+
+def batch_benchmark(n=100_000):
+    """Fix a batch of strings: one call per string, versus fix_texts."""
+    batch = (CASES * (n // len(CASES) + 1))[:n]
+    print(f"\nBatch of {n:,} strings ({os.cpu_count()} CPU threads available)")
+
+    def seconds(fn):
+        fn()  # warm up
+        start = time.perf_counter()
+        fn()
+        return time.perf_counter() - start
+
+    rows = [
+        ("ftfy, fix_text loop", seconds(lambda: [ftfy.fix_text(t) for t in batch])),
+        ("ftfy_rs, fix_text loop", seconds(lambda: [ftfy_rs.fix_text(t) for t in batch])),
+        ("ftfy_rs, fix_texts", seconds(lambda: ftfy_rs.fix_texts(batch))),
+    ]
+    baseline = rows[0][1]
+    for name, secs in rows:
+        print(f"{name:24} {secs:8.3f} s {n / secs / 1e6:7.2f} M strings/s {baseline / secs:8.1f}x")
 
 
 if __name__ == "__main__":

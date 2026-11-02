@@ -17,6 +17,7 @@ use std::borrow::Cow;
 
 pub mod badness;
 pub mod chardata;
+pub mod codecs;
 pub mod fixes;
 pub mod normalize;
 mod scan;
@@ -149,9 +150,16 @@ const fn step(action: &'static str, parameter: &'static str) -> ExplanationStep 
 /// Fix text in independent segments (lines, or chunks of at most
 /// `max_decode_length` characters), returning the fixed text.
 pub fn fix_text(text: &str, config: &TextFixerConfig) -> String {
+    fix_text_cow(text, config).into_owned()
+}
+
+/// Like [`fix_text`], but returns `Cow::Borrowed` when the text needs no
+/// changes, without allocating.
+pub fn fix_text_cow<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str> {
     let mut config = Cow::Borrowed(config);
     let max_len = config.max_decode_length.max(1);
-    let mut out = String::with_capacity(text.len());
+    // Allocated when the first segment changes.
+    let mut out: Option<String> = None;
     let mut pos = 0;
     while pos < text.len() {
         let rest = &text[pos..];
@@ -169,14 +177,27 @@ pub fn fix_text(text: &str, config: &TextFixerConfig) -> String {
         if config.unescape_html == UnescapeHtml::Auto && segment.contains('<') {
             config.to_mut().unescape_html = UnescapeHtml::Never;
         }
-        if is_trivially_clean(segment) {
-            out.push_str(segment);
+        let fixed = if is_trivially_clean(segment) {
+            None
         } else {
-            out.push_str(&fix_and_explain(segment, &config).0);
+            Some(fix_and_explain(segment, &config).0).filter(|fixed| fixed != segment)
+        };
+        match (&mut out, fixed) {
+            (Some(out), fixed) => out.push_str(fixed.as_deref().unwrap_or(segment)),
+            (None, Some(fixed)) => {
+                let mut new = String::with_capacity(text.len() + 16);
+                new.push_str(&text[..pos]);
+                new.push_str(&fixed);
+                out = Some(new);
+            }
+            (None, None) => {}
         }
         pos += end;
     }
-    out
+    match out {
+        Some(out) => Cow::Owned(out),
+        None => Cow::Borrowed(text),
+    }
 }
 
 /// Text that no fixer would change, whatever the config: printable ASCII

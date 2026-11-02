@@ -13,5 +13,11 @@ def test_version_matches_metadata():
 
 
 def test_cli_entry_point():
-    scripts = {ep.name: ep.value for ep in entry_points(group="console_scripts")}
+    eps = entry_points()
+    if hasattr(eps, "select"):
+        eps = eps.select(group="console_scripts")
+    else:
+        # Python 3.9 returns a dict of groups.
+        eps = eps.get("console_scripts", [])
+    scripts = {ep.name: ep.value for ep in eps}
     assert scripts.get("ftfy-rs") == "ftfy_rs.cli:main"

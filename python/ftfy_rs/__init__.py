@@ -19,7 +19,7 @@ from ftfy_rs import _native, bad_codecs, chardata, fixes
 from ftfy_rs.badness import is_bad
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 __version__ = "0.1.0"
 
@@ -192,6 +192,26 @@ def fix_text(text: str, config: TextFixerConfig | None = None, **kwargs: Any) ->
     config = _config_from_kwargs(config, kwargs, explain=False)
     _check_text(text)
     return _native.fix_text(text, config)
+
+
+def fix_texts(
+    texts: Iterable[str], config: TextFixerConfig | None = None, **kwargs: Any
+) -> list[str]:
+    """
+    Fix many texts at once. This gives the same result as
+    ``[fix_text(text, config) for text in texts]``, but large batches are
+    fixed in parallel on all CPU cores, with the GIL released.
+
+    This function isn't part of ftfy; it's an addition in ftfy_rs.
+
+        >>> fix_texts(['schÃ¶n', 'âœ” No problems', 'already fine'])
+        ['schön', '✔ No problems', 'already fine']
+
+    Every item must be a str. The number of threads can be set with the
+    RAYON_NUM_THREADS environment variable.
+    """
+    config = _config_from_kwargs(config, kwargs, explain=False)
+    return _native.fix_texts(texts, config)
 
 
 def fix_and_explain(
@@ -393,6 +413,7 @@ __all__ = [
     "fix_file",
     "fix_text",
     "fix_text_segment",
+    "fix_texts",
     "ftfy",
     "guess_bytes",
     "is_bad",

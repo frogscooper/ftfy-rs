@@ -36,6 +36,14 @@ Windows 11, Python 3.13, `python bench/bench.py`:
 
 Long texts are fixed with the GIL released, so threads scale. `import ftfy_rs` takes about 35 ms, against 98 ms for ftfy.
 
+**Batches.** `ftfy_rs.fix_texts(texts)` fixes a whole list across all CPU cores. On 100,000 strings from the fuzz corpus, with 16 CPU threads:
+
+| 100,000 strings              | time    | vs ftfy |
+|------------------------------|--------:|--------:|
+| `ftfy.fix_text` in a loop    | 8.21 s  | 1×      |
+| `ftfy_rs.fix_text` in a loop | 0.46 s  | 18×     |
+| `ftfy_rs.fix_texts`          | 0.09 s  | **90×** |
+
 To see where the Rust side spends its time, run `cargo run --release --example profile -- corpus.bin` (see [`bench/dump_corpus.py`](https://github.com/frogscooper/ftfy-rs/blob/master/bench/dump_corpus.py)).
 
 ## How it stays faithful
@@ -66,6 +74,28 @@ It also installs an `ftfy-rs` command that works like ftfy's `ftfy` command:
 ```bash
 ftfy-rs mojibake.txt -o fixed.txt
 ```
+
+To fix many strings at once, such as a column of data, use `fix_texts`. It's an addition that ftfy doesn't have, and gives the same results as calling `fix_text` on each string, but runs in parallel with the GIL released:
+
+```python
+fixed = ftfy_rs.fix_texts(df["comment"].tolist())
+```
+
+There's also a native `ftfy-rs` command, written in Rust, for large files. It takes the same options as ftfy's command and gives byte-for-byte the same output and error messages, but runs on all cores. On a 10.5 MB file with 16 CPU threads (`python bench/bench_cli.py`):
+
+| command                         | time    | speed     | vs ftfy |
+|---------------------------------|--------:|----------:|--------:|
+| `ftfy` (Python)                 | 14.1 s  | 0.7 MB/s  | 1×      |
+| `ftfy-rs` (from the Python package) | 1.60 s | 6.6 MB/s | 9× |
+| `ftfy-rs` (native)              | 0.29 s  | 36 MB/s   | **49×** |
+
+Install it with Cargo:
+
+```bash
+cargo install --git https://github.com/frogscooper/ftfy-rs ftfy-rs
+```
+
+The native command handles UTF-8, `utf-8-variants`, UTF-16, Latin-1, Windows-1252, MacRoman, CP437, ISO-8859-2 and ftfy's `sloppy-windows-*` codecs. For any other encoding, use the Python one: `python -m ftfy_rs.cli -e shift_jis ...`.
 
 The API mirrors ftfy: `fix_text`, `fix_and_explain`, `fix_encoding`, `fix_encoding_and_explain`, `fix_text_segment`, `fix_file`, `guess_bytes`, `apply_plan`, `explain_unicode`, `TextFixerConfig`, `ftfy_rs.fixes.*`, `ftfy_rs.badness.*`, and the `sloppy-*`/`utf-8-variants` codecs.
 

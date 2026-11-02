@@ -317,17 +317,16 @@ fn next_segment_to_fix(text: &str, pos: usize, max_len: usize, html: UnescapeHtm
 /// The index of the first byte equal to `a` or `b`, or `bytes.len()` if
 /// there's none. Checks eight bytes at a time.
 pub(crate) fn find_either(bytes: &[u8], a: u8, b: u8) -> usize {
-    let mut chunks = bytes.chunks_exact(8);
+    let (chunks, tail) = bytes.as_chunks::<8>();
     let mut offset = 0;
-    for chunk in &mut chunks {
-        let x = u64::from_le_bytes(chunk.try_into().unwrap());
+    for chunk in chunks {
+        let x = u64::from_le_bytes(*chunk);
         let mask = eq_mask(x, a) | eq_mask(x, b);
         if mask != 0 {
             return offset + (mask.trailing_zeros() / 8) as usize;
         }
         offset += 8;
     }
-    let tail = chunks.remainder();
     offset
         + tail
             .iter()
@@ -364,16 +363,15 @@ pub(crate) fn find_interesting(bytes: &[u8], ampersand: bool, less_than: bool) -
     // When they don't matter, look for DEL again instead.
     let amp = if ampersand { b'&' } else { 0x7F };
     let lt = if less_than { b'<' } else { 0x7F };
-    let mut chunks = bytes.chunks_exact(8);
+    let (chunks, tail) = bytes.as_chunks::<8>();
     let mut offset = 0;
-    for chunk in &mut chunks {
-        let mask = interesting_mask(u64::from_le_bytes(chunk.try_into().unwrap()), amp, lt);
+    for chunk in chunks {
+        let mask = interesting_mask(u64::from_le_bytes(*chunk), amp, lt);
         if mask != 0 {
             return offset + (mask.trailing_zeros() / 8) as usize;
         }
         offset += 8;
     }
-    let tail = chunks.remainder();
     offset
         + tail
             .iter()

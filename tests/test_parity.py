@@ -254,6 +254,76 @@ def test_long_text_parity():
     )
 
 
+def badness_alphabet() -> list[str]:
+    """Every character named in a small class of ftfy's badness regex."""
+    try:
+        from re import _parser as P
+    except ImportError:  # Python < 3.11
+        import sre_parse as P
+
+    chars = set(" aA1.'\"")
+
+    def walk(tree):
+        for op, av in tree:
+            if op is P.LITERAL:
+                chars.add(chr(av))
+            elif op is P.IN and len(av) < 50:
+                for item_op, item_av in av:
+                    if item_op is P.LITERAL:
+                        chars.add(chr(item_av))
+                    elif item_op is P.RANGE and item_av[1] - item_av[0] < 500:
+                        chars.update(map(chr, range(item_av[0], item_av[1] + 1)))
+            elif op is P.BRANCH:
+                for branch in av[1]:
+                    walk(branch)
+            elif op is P.SUBPATTERN:
+                walk(av[-1])
+            elif op in (P.MAX_REPEAT, P.MIN_REPEAT):
+                walk(av[2])
+
+    pattern = ftfy.badness.BADNESS_RE
+    walk(P.parse(pattern.pattern, pattern.flags))
+    return sorted(chars)
+
+
+def test_badness_prefilter_dense():
+    """ftfy_rs skips the badness regex for text that can't match it. Check
+    that on random strings packed with the characters the regex looks for,
+    where any wrongly skipped match would show up."""
+    rng = random.Random(SEED)
+    alphabet = badness_alphabet()
+    for _ in range(200_000):
+        text = "".join(rng.choices(alphabet, k=rng.randint(1, 6)))
+        assert ftfy_rs.badness.is_bad(text) == ftfy.badness.is_bad(text), repr(text)
+        assert ftfy_rs.badness.badness(text) == ftfy.badness.badness(text), repr(text)
+
+
+@pytest.mark.parametrize("max_decode_length", [5, 64, 300, 1_000_000])
+@pytest.mark.parametrize("unescape_html", ["auto", True, False])
+def test_document_parity(max_decode_length, unescape_html):
+    """Whole documents, where ftfy_rs skips over long runs of plain ASCII
+    lines. Long ASCII lines, HTML switching on halfway, and lines split by
+    max_decode_length all have to come out as in ftfy."""
+    rng = random.Random(SEED + max_decode_length)
+    pieces = []
+    for _ in range(3000):
+        r = rng.random()
+        if r < 0.5:
+            pieces.append("plain ascii line, nothing to see here " * rng.randint(1, 30))
+        elif r < 0.55:
+            pieces.append("fish &amp; chips &lt; 3")
+        elif r < 0.56:
+            pieces.append("<p>some HTML</p>")
+        elif r < 0.6:
+            pieces.append("x" * rng.randint(1, 700) + rng.choice(CASES))
+        else:
+            pieces.append(rng.choice(CASES))
+        pieces.append(rng.choice(["\n", "\n", "\n", "\r\n", " "]))
+    text = "".join(pieces)
+    kwargs = dict(max_decode_length=max_decode_length, unescape_html=unescape_html)
+    assert ftfy_rs.fix_text(text, **kwargs) == ftfy.fix_text(text, **kwargs)
+
+
 # Mismatches found by long fuzzing runs, kept as fixed regression cases.
 REGRESSIONS = [
     # The Rust side has newer Unicode data: U+0558 is unassigned in Python

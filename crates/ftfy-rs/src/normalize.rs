@@ -59,7 +59,10 @@ pub fn set_unassigned(mut chars: Vec<char>) -> bool {
 /// Apply Unicode normalization, returning Borrowed if the text was already
 /// normalized.
 pub fn normalize(text: &str, form: Normalization) -> Cow<'_, str> {
-    if text.is_ascii() {
+    // If the quick check says the text is normalized in our data, it is in
+    // the older data too: the characters it lacks are inert, and the
+    // stability policy keeps the rest's normalization properties fixed.
+    if text.is_ascii() || quick_check(text, form) == IsNormalized::Yes {
         return Cow::Borrowed(text);
     }
     let unassigned = UNASSIGNED.get().map_or(&[][..], Vec::as_slice);
@@ -85,17 +88,20 @@ pub fn normalize(text: &str, form: Normalization) -> Cow<'_, str> {
     }
 }
 
-fn normalize_with_our_data(text: &str, form: Normalization) -> Cow<'_, str> {
-    if text.is_ascii() {
-        return Cow::Borrowed(text);
-    }
-    let quick = match form {
+fn quick_check(text: &str, form: Normalization) -> IsNormalized {
+    match form {
         Normalization::Nfc => is_nfc_quick(text.chars()),
         Normalization::Nfd => is_nfd_quick(text.chars()),
         Normalization::Nfkc => is_nfkc_quick(text.chars()),
         Normalization::Nfkd => is_nfkd_quick(text.chars()),
-    };
-    if quick == IsNormalized::Yes {
+    }
+}
+
+fn normalize_with_our_data(text: &str, form: Normalization) -> Cow<'_, str> {
+    if text.is_ascii() {
+        return Cow::Borrowed(text);
+    }
+    if quick_check(text, form) == IsNormalized::Yes {
         return Cow::Borrowed(text);
     }
     let normalized: String = match form {

@@ -155,13 +155,101 @@ pub fn fix_text(text: &str, config: &TextFixerConfig) -> String {
 
 /// Like [`fix_text`], but returns `Cow::Borrowed` when the text needs no
 /// changes, without allocating.
+///
+/// With the `parallel` feature (on by default), long texts are fixed on all
+/// cores, using rayon's global thread pool.
 pub fn fix_text_cow<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str> {
+    #[cfg(feature = "parallel")]
+    if text.len() >= PARALLEL_MIN_LEN && rayon::current_num_threads() > 1 {
+        return fix_text_parallel(text, config);
+    }
+    fix_text_serial(text, config)
+}
+
+/// Texts shorter than this are fixed on one thread.
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_LEN: usize = 256 * 1024;
+
+/// Fix the text in chunks on rayon's thread pool. Chunks start at line
+/// starts, which are always segment boundaries, so the segments are the same
+/// as when fixing it in one go.
+#[cfg(feature = "parallel")]
+fn fix_text_parallel<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str> {
+    use rayon::prelude::*;
+
+    let target = (text.len() / (rayon::current_num_threads() * 4)).max(64 * 1024);
+    let mut bounds = vec![0];
+    let mut pos = 0;
+    while pos + target < text.len() {
+        match text.as_bytes()[pos + target..]
+            .iter()
+            .position(|&b| b == b'\n')
+        {
+            Some(i) if pos + target + i + 1 < text.len() => {
+                pos += target + i + 1;
+                bounds.push(pos);
+            }
+            _ => break,
+        }
+    }
+    bounds.push(text.len());
+
+    // A segment containing '<' turns HTML unescaping off for the rest of the
+    // text, so chunks after the first '<' start with it off.
+    let first_lt = match config.unescape_html {
+        UnescapeHtml::Auto => text.find('<'),
+        _ => None,
+    };
+    let mut html_off = config.clone();
+    html_off.unescape_html = UnescapeHtml::Never;
+
+    let fixed: Vec<Cow<'a, str>> = bounds
+        .par_windows(2)
+        .map(|w| {
+            let after_lt = first_lt.is_some_and(|lt| lt < w[0]);
+            fix_text_serial(&text[w[0]..w[1]], if after_lt { &html_off } else { config })
+        })
+        .collect();
+    if fixed.iter().all(|chunk| matches!(chunk, Cow::Borrowed(_))) {
+        return Cow::Borrowed(text);
+    }
+    // Copy the chunks into place in parallel too: done serially, this takes
+    // a fifth of the time.
+    let mut buf = vec![0u8; fixed.iter().map(|chunk| chunk.len()).sum()];
+    let mut slots = Vec::with_capacity(fixed.len());
+    let mut rest = buf.as_mut_slice();
+    for chunk in &fixed {
+        let (slot, tail) = rest.split_at_mut(chunk.len());
+        slots.push(slot);
+        rest = tail;
+    }
+    slots
+        .into_par_iter()
+        .zip(fixed.par_iter())
+        .for_each(|(slot, chunk)| slot.copy_from_slice(chunk.as_bytes()));
+    // SAFETY: `buf` is the chunks, which are all valid UTF-8, end to end.
+    Cow::Owned(unsafe { String::from_utf8_unchecked(buf) })
+}
+
+/// [`fix_text_cow`] on the current thread.
+fn fix_text_serial<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str> {
     let mut config = Cow::Borrowed(config);
     let max_len = config.max_decode_length.max(1);
     // Allocated when the first segment changes.
     let mut out: Option<String> = None;
     let mut pos = 0;
     while pos < text.len() {
+        // Skip in bulk over the lines that no fixer would change, up to the
+        // segment holding the next byte that might matter.
+        let skip_to = next_segment_to_fix(text, pos, max_len, config.unescape_html);
+        if let Some(out) = &mut out {
+            out.push_str(&text[pos..skip_to]);
+        }
+        pos = skip_to;
+        if pos == text.len() {
+            break;
+        }
+
         let rest = &text[pos..];
         let mut end = rest.find('\n').map_or(rest.len(), |i| i + 1);
         // Lengths are in codepoints, as in Python. A segment can only be too
@@ -177,10 +265,12 @@ pub fn fix_text_cow<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str>
         if config.unescape_html == UnescapeHtml::Auto && segment.contains('<') {
             config.to_mut().unescape_html = UnescapeHtml::Never;
         }
-        let fixed = if is_trivially_clean(segment) {
-            None
-        } else {
-            Some(fix_and_explain(segment, &config).0).filter(|fixed| fixed != segment)
+        // The segment has a byte that find_interesting stopped at, so it's
+        // not trivially clean, and the '<' check is done.
+        let steps = config.explain.then(Vec::new);
+        let fixed = match fix_segment_body(segment, &config, steps).0 {
+            Cow::Owned(fixed) if fixed != segment => Some(fixed),
+            _ => None,
         };
         match (&mut out, fixed) {
             (Some(out), fixed) => out.push_str(fixed.as_deref().unwrap_or(segment)),
@@ -198,6 +288,101 @@ pub fn fix_text_cow<'a>(text: &'a str, config: &TextFixerConfig) -> Cow<'a, str>
         Some(out) => Cow::Owned(out),
         None => Cow::Borrowed(text),
     }
+}
+
+/// Where the next segment that could need fixing starts, given that `pos`
+/// is the start of a segment. Everything before it is unchanged by
+/// [`fix_text`].
+///
+/// A segment can only change if it has a byte outside printable ASCII
+/// (other than tab, newline and form feed), or an '&' or '<' that HTML
+/// unescaping cares about. We find the first such byte, then step back to
+/// the start of its segment: the start of its line, plus whole chunks of
+/// `max_len` characters if the line is long. Everything skipped is ASCII,
+/// so characters are bytes there.
+fn next_segment_to_fix(text: &str, pos: usize, max_len: usize, html: UnescapeHtml) -> usize {
+    let found = pos
+        + find_interesting(
+            &text.as_bytes()[pos..],
+            html != UnescapeHtml::Never,
+            html == UnescapeHtml::Auto,
+        );
+    if found == text.len() {
+        return found;
+    }
+    let line_start = text[pos..found].rfind('\n').map_or(pos, |i| pos + i + 1);
+    line_start + (found - line_start) / max_len * max_len
+}
+
+/// The index of the first byte equal to `a` or `b`, or `bytes.len()` if
+/// there's none. Checks eight bytes at a time.
+pub(crate) fn find_either(bytes: &[u8], a: u8, b: u8) -> usize {
+    let mut chunks = bytes.chunks_exact(8);
+    let mut offset = 0;
+    for chunk in &mut chunks {
+        let x = u64::from_le_bytes(chunk.try_into().unwrap());
+        let mask = eq_mask(x, a) | eq_mask(x, b);
+        if mask != 0 {
+            return offset + (mask.trailing_zeros() / 8) as usize;
+        }
+        offset += 8;
+    }
+    let tail = chunks.remainder();
+    offset
+        + tail
+            .iter()
+            .position(|&t| t == a || t == b)
+            .unwrap_or(tail.len())
+}
+
+/// 0x80 in each byte of `x` that equals `c`.
+#[inline(always)]
+fn eq_mask(x: u64, c: u8) -> u64 {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let t = x ^ (LO * c as u64);
+    !(((t & !HI) + !HI) | t) & HI
+}
+
+/// For eight bytes read little-endian into `x`, 0x80 in each byte that's
+/// outside printable ASCII (other than tab, newline and form feed), or equal
+/// to `amp` or `lt`.
+#[inline(always)]
+pub(crate) fn interesting_mask(x: u64, amp: u8, lt: u8) -> u64 {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let eq = |c: u8| eq_mask(x, c);
+    // Bytes below 0x20 (with the high bit clear).
+    let control = !((x & !HI) + LO * (0x80 - 0x20)) & !x & HI;
+    let allowed = eq(b'\t') | eq(b'\n') | eq(0x0C);
+    (x & HI) | (control & !allowed) | eq(0x7F) | eq(amp) | eq(lt)
+}
+
+/// The index of the first byte that could make a segment need fixing, or
+/// `bytes.len()` if there's none. Checks eight bytes at a time.
+pub(crate) fn find_interesting(bytes: &[u8], ampersand: bool, less_than: bool) -> usize {
+    // When they don't matter, look for DEL again instead.
+    let amp = if ampersand { b'&' } else { 0x7F };
+    let lt = if less_than { b'<' } else { 0x7F };
+    let mut chunks = bytes.chunks_exact(8);
+    let mut offset = 0;
+    for chunk in &mut chunks {
+        let mask = interesting_mask(u64::from_le_bytes(chunk.try_into().unwrap()), amp, lt);
+        if mask != 0 {
+            return offset + (mask.trailing_zeros() / 8) as usize;
+        }
+        offset += 8;
+    }
+    let tail = chunks.remainder();
+    offset
+        + tail
+            .iter()
+            .position(|&b| {
+                !matches!(b, 0x20..=0x7E | b'\t' | b'\n' | 0x0C)
+                    || (ampersand && b == b'&')
+                    || (less_than && b == b'<')
+            })
+            .unwrap_or(tail.len())
 }
 
 /// Text that no fixer would change, whatever the config: printable ASCII
@@ -218,39 +403,57 @@ pub fn fix_and_explain(
     text: &str,
     config: &TextFixerConfig,
 ) -> (String, Option<Vec<ExplanationStep>>) {
+    let (fixed, steps) = fix_segment(text, config);
+    (fixed.into_owned(), steps)
+}
+
+/// Like [`fix_and_explain`], but returns `Cow::Borrowed` when nothing
+/// changed.
+fn fix_segment<'a>(
+    text: &'a str,
+    config: &TextFixerConfig,
+) -> (Cow<'a, str>, Option<Vec<ExplanationStep>>) {
     let mut config = Cow::Borrowed(config);
     if config.unescape_html == UnescapeHtml::Auto && text.contains('<') {
         config.to_mut().unescape_html = UnescapeHtml::Never;
     }
-    let mut steps = config.explain.then(Vec::new);
+    let steps = config.explain.then(Vec::new);
     if is_trivially_clean(text) {
-        return (text.to_string(), steps);
+        return (Cow::Borrowed(text), steps);
     }
+    fix_segment_body(text, &config, steps)
+}
 
-    let mut current = text.to_string();
+/// The fixing loop of [`fix_segment`], for a config that has already had
+/// HTML unescaping turned off if the text contains '<'.
+fn fix_segment_body<'a>(
+    text: &'a str,
+    config: &TextFixerConfig,
+    mut steps: Option<Vec<ExplanationStep>>,
+) -> (Cow<'a, str>, Option<Vec<ExplanationStep>>) {
+    let mut current = Cow::Borrowed(text);
+    // Which fixers could change the text; rescanned whenever it changes.
+    let mut bits = scan::scan(text);
     loop {
-        let mut text = Cow::Borrowed(current.as_str());
-        // Which fixers could change the text; rescanned whenever it changes.
-        let mut bits = scan::scan(&text);
+        let mut text = Cow::Borrowed(&*current);
 
-        if config.unescape_html != UnescapeHtml::Never && bits & scan::AMPERSAND != 0 {
-            try_fix(
-                &mut text,
-                &mut bits,
-                fixes::unescape_html,
-                "unescape_html",
-                &mut steps,
-            );
+        if config.unescape_html != UnescapeHtml::Never
+            && bits & scan::AMPERSAND != 0
+            && try_fix(&mut text, fixes::unescape_html, "unescape_html", &mut steps)
+        {
+            bits = scan::scan(&text);
         }
 
-        if config.fix_encoding && bits & scan::NON_ASCII != 0 {
+        // Text without a possible badness match is never changed by
+        // fix_encoding.
+        if config.fix_encoding && bits & scan::MAYBE_BAD != 0 {
             let fixed = match &mut steps {
                 // Python ftfy calls fix_encoding() here without passing on
                 // the config, so the encoding sub-options only take effect
                 // when explanations are on.
                 None => into_changed(fix_encoding_cow(&text, &TextFixerConfig::no_explain())),
                 Some(steps) => {
-                    let (fixed, encoding_steps) = fix_encoding_and_explain_cow(&text, &config);
+                    let (fixed, encoding_steps) = fix_encoding_and_explain_cow(&text, config);
                     steps.extend(encoding_steps);
                     into_changed(fixed)
                 }
@@ -312,29 +515,39 @@ pub fn fix_and_explain(
             ),
         ];
         for (enabled, bit, fixer, name) in fixers {
-            if enabled && bits & bit != 0 {
-                try_fix(&mut text, &mut bits, fixer, name, &mut steps);
+            if enabled && bits & bit != 0 && try_fix(&mut text, fixer, name, &mut steps) {
+                // Swapping curly quotes for ASCII ones can't give any other
+                // fixer something to do, so the other bits still hold and
+                // there's no need to rescan.
+                bits = if bit == scan::CURLY_QUOTE {
+                    bits & !bit
+                } else {
+                    scan::scan(&text)
+                };
             }
         }
 
         if let Some(form) = config.normalization {
-            let already_nfc = form == Normalization::Nfc && bits & scan::ABOVE_U0300 == 0;
-            if bits & scan::NON_ASCII != 0 && !already_nfc {
+            // The bit for a character that could make normalization change
+            // the text.
+            let active = match form {
+                Normalization::Nfc => scan::NFC_ACTIVE,
+                Normalization::Nfkc => scan::NFKC_ACTIVE,
+                Normalization::Nfd | Normalization::Nfkd => scan::NON_ASCII,
+            };
+            if bits & active != 0 {
                 if let Some(fixed) = into_changed(normalize(&text, form)) {
                     if let Some(steps) = &mut steps {
                         steps.push(step("normalize", form.name()));
                     }
+                    bits = scan::scan(&fixed);
                     text = Cow::Owned(fixed);
                 }
             }
         }
 
-        let next = match text {
-            Cow::Borrowed(_) => None,
-            Cow::Owned(next) => Some(next),
-        };
-        match next {
-            Some(next) if next != current => current = next,
+        match into_changed(text) {
+            Some(next) if next != *current => current = Cow::Owned(next),
             _ => return (current, steps),
         }
     }
@@ -350,25 +563,25 @@ fn into_changed(text: Cow<'_, str>) -> Option<String> {
     }
 }
 
-/// Apply a fixer, recording it and rescanning the text if it changed.
+/// Apply a fixer, recording it if it changed the text. Returns whether it
+/// did.
 fn try_fix(
     text: &mut Cow<'_, str>,
-    bits: &mut u16,
     fixer: Fixer,
     name: &'static str,
     steps: &mut Option<Vec<ExplanationStep>>,
-) {
+) -> bool {
     let Some(fixed) = into_changed(fixer(text)) else {
-        return;
+        return false;
     };
     if fixed == **text {
-        return;
+        return false;
     }
     if let Some(steps) = steps {
         steps.push(step("apply", name));
     }
-    *bits = scan::scan(&fixed);
     *text = Cow::Owned(fixed);
+    true
 }
 
 /// Apply just the encoding-fixing steps of ftfy, discarding the explanation.

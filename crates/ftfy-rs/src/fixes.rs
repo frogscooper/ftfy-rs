@@ -24,25 +24,32 @@ use crate::{fix_encoding, TextFixerConfig};
 /// wrote a replacement for the character into the buffer (possibly nothing,
 /// to delete it), or false to keep the character.
 fn translate<'a>(text: &'a str, mut f: impl FnMut(char, &mut String) -> bool) -> Cow<'a, str> {
-    let mut chars = text.char_indices();
-    let mut out = loop {
-        let Some((i, ch)) = chars.next() else {
-            return Cow::Borrowed(text);
-        };
-        let mut replacement = String::new();
+    let mut out: Option<String> = None;
+    let mut replacement = String::new();
+    // The text before `copied` is already in `out`.
+    let mut copied = 0;
+    for (i, ch) in text.char_indices() {
         if f(ch, &mut replacement) {
-            let mut out = String::with_capacity(text.len() + replacement.len());
-            out.push_str(&text[..i]);
+            let out = out.get_or_insert_with(|| String::with_capacity(text.len() + 8));
+            out.push_str(&text[copied..i]);
             out.push_str(&replacement);
-            break out;
-        }
-    };
-    for (_, ch) in chars {
-        if !f(ch, &mut out) {
-            out.push(ch);
+            replacement.clear();
+            copied = i + ch.len_utf8();
         }
     }
-    Cow::Owned(out)
+    finish(text, out, copied)
+}
+
+/// The result of a fixer that copied the text before `copied` into `out`,
+/// if it changed anything.
+fn finish(text: &str, out: Option<String>, copied: usize) -> Cow<'_, str> {
+    match out {
+        Some(mut out) => {
+            out.push_str(&text[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(text),
+    }
 }
 
 static HTML_ENTITY_RE: LazyLock<Regex> =
@@ -114,21 +121,43 @@ pub fn remove_terminal_escapes(text: &str) -> Cow<'_, str> {
     ANSI_RE.replace_all(text, "")
 }
 
+/// Like [`translate`], for a fixer that only replaces characters whose UTF-8
+/// starts with the byte `a` or `b`. Those can be found eight bytes at a time.
+fn translate_by_lead_byte(
+    text: &str,
+    a: u8,
+    b: u8,
+    f: impl Fn(char) -> Option<&'static str>,
+) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut i = 0;
+    loop {
+        i += crate::find_either(&bytes[i..], a, b);
+        if i >= bytes.len() {
+            break;
+        }
+        // `a` and `b` are lead bytes, so this is the start of a character.
+        let ch = text[i..].chars().next().unwrap();
+        if let Some(rep) = f(ch) {
+            let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+            out.push_str(&text[copied..i]);
+            out.push_str(rep);
+            copied = i + ch.len_utf8();
+        }
+        i += ch.len_utf8();
+    }
+    finish(text, out, copied)
+}
+
 /// Replace curly quotation marks with straight equivalents.
 pub fn uncurl_quotes(text: &str) -> Cow<'_, str> {
-    if text.is_ascii() {
-        return Cow::Borrowed(text);
-    }
-    translate(text, |ch, out| match ch {
-        '\u{2BC}' | '\u{2018}'..='\u{201B}' => {
-            out.push('\'');
-            true
-        }
-        '\u{201C}'..='\u{201F}' => {
-            out.push('"');
-            true
-        }
-        _ => false,
+    // U+02BC is CA BC in UTF-8, and U+2018 to U+201F start with E2.
+    translate_by_lead_byte(text, 0xCA, 0xE2, |ch| match ch {
+        '\u{2BC}' | '\u{2018}'..='\u{201B}' => Some("'"),
+        '\u{201C}'..='\u{201F}' => Some("\""),
+        _ => None,
     })
 }
 
@@ -161,21 +190,9 @@ pub fn fix_latin_ligatures(text: &str) -> Cow<'_, str> {
 
 /// Replace halfwidth and fullwidth forms with their standard-width forms.
 pub fn fix_character_width(text: &str) -> Cow<'_, str> {
-    if text.is_ascii() {
-        return Cow::Borrowed(text);
-    }
-    translate(text, |ch, out| {
-        if (ch as u32) < 0x3000 {
-            return false;
-        }
-        match lookup(&WIDTH_MAP, ch) {
-            Some(rep) => {
-                out.push_str(rep);
-                true
-            }
-            None => false,
-        }
-    })
+    // Everything in the width map is U+3000 or in U+FF01 to U+FFEF, which
+    // start with E3 and EF in UTF-8 (checked by a test).
+    translate_by_lead_byte(text, 0xE3, 0xEF, |ch| lookup(&WIDTH_MAP, ch))
 }
 
 /// Convert all line breaks (CRLF, CR, U+2028, U+2029, U+85) to Unix style.
@@ -258,6 +275,15 @@ fn control_chars_match_table() {
         .map(|ch| ch as u32)
         .collect();
     assert_eq!(from_match, CONTROL_CHARS);
+}
+
+#[cfg(test)]
+#[test]
+fn width_map_lead_bytes() {
+    for &(cp, _) in WIDTH_MAP.iter() {
+        let lead = char::from_u32(cp).unwrap().to_string().as_bytes()[0];
+        assert!(lead == 0xE3 || lead == 0xEF, "U+{cp:04X}");
+    }
 }
 
 /// Remove a byte-order mark that was accidentally decoded as if it were part

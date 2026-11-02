@@ -4,6 +4,8 @@
 //! The corpus is a file of length-prefixed strings (little-endian u32 byte
 //! length, then UTF-8), as written by `bench/dump_corpus.py`.
 //!
+//! A `.txt` file is read as a document instead, one case per line.
+//!
 //! Usage:  cargo run --release --example profile -- corpus.bin
 
 use std::hint::black_box;
@@ -12,6 +14,10 @@ use std::time::{Duration, Instant};
 use ftfy_rs::{fixes, Normalization, TextFixerConfig};
 
 fn load(path: &str) -> Vec<String> {
+    if path.ends_with(".txt") {
+        let text = std::fs::read_to_string(path).expect("read document");
+        return text.split_inclusive('\n').map(str::to_string).collect();
+    }
     let data = std::fs::read(path).expect("read corpus");
     let mut cases = Vec::new();
     let mut i = 0;

@@ -8,10 +8,10 @@ First release: a Rust port of [ftfy](https://github.com/rspeer/python-ftfy) 6.3.
 - An `ftfy-rs` command that works like ftfy's `ftfy` command.
 - Identical output to ftfy, explanations included. ftfy's own test suite passes, and 500,000 generated inputs match exactly.
 - Unicode normalization matches the running Python's `unicodedata`, whatever its Unicode version.
-- 19–52× faster than ftfy on the included benchmarks. Long texts are fixed with the GIL released.
+- 22–78× faster than ftfy on short strings, and 200–500× on whole documents. Long texts are fixed on all cores with the GIL released.
 - Reproduces ftfy's quirks, including its `utf-8-variants` codec treating a final newline as the last byte of a CESU-8 sequence.
 - `fix_texts(texts)`, an addition to ftfy's API: fixes a list of strings in parallel with the GIL released, with the same results as calling `fix_text` on each.
 - Unchanged text is returned as the same object, without a copy.
-- A native `ftfy-rs` command, installable with Cargo, that matches ftfy's `ftfy` command byte for byte and runs on all cores: 49× faster on a 10 MB file.
+- A native `ftfy-rs` command, installable with Cargo, that matches ftfy's `ftfy` command byte for byte and runs on all cores: 62× faster on a 10 MB file.
 - `ftfy_rs::codecs` for Rust: ftfy's sloppy codecs, `utf-8-variants`, `guess_bytes`, and Python-style decode errors.
-- Also usable as a pure Rust crate, `ftfy-rs`.
+- Also usable as a pure Rust crate, `ftfy-rs`. Its `parallel` feature (on by default) fixes long texts on all cores with rayon: 1–2 GB/s on 16 threads, and 260–600 MB/s on one.

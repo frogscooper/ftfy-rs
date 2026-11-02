@@ -11,40 +11,63 @@ ftfy.fix_and_explain("sÃ³")
 # ExplainedText(text='só', explanation=[('encode', 'latin-1'), ('decode', 'utf-8')])
 ```
 
-**Goal: byte-for-byte identical output to ftfy 6.3.1, 15–50× faster.**
+**Byte-for-byte identical output to ftfy 6.3.1: 20–80× faster on single strings, and 200–500× on whole documents.**
 
 ## Status
 
 Early, but it already matches ftfy everywhere we've tested:
 
-- **ftfy's own test suite passes** against `ftfy_rs` (336 tests, including the CLI). The 10 cases ftfy marks as known failures fail in exactly the same way.
+- **ftfy's own test suite passes** against `ftfy_rs` (342 tests, including the CLI). The 10 cases ftfy marks as known failures fail in exactly the same way.
 - **Unicode normalization matches your Python's `unicodedata`** for every codepoint in all four forms, even though the Rust side ships newer Unicode data (see below).
 - **Differential fuzzing:** 20,000 generated inputs (500,000 in occasional longer runs) run through both libraries, with random configs, must give identical `fix_text`, `fix_and_explain` (including explanations), `fix_encoding`, `badness`, `possible_encoding`, and every individual fixer. Inputs cover mojibake in all 10 codecs ftfy handles, double mojibake, lossy `�`/`?` sequences, HTML entities, lone surrogates, line breaks, ANSI escapes and more. Every fix path in ftfy is exercised.
+- **The shortcuts are checked too:** 200,000 random strings packed with the characters ftfy's mojibake regex looks for (about 45% of them bad) must get the same `is_bad` and `badness`, and whole documents must come out the same with every `max_decode_length` and HTML setting.
 
 ## Benchmarks
 
 Windows 11, Python 3.13, `python bench/bench.py`:
 
-| workload (`fix_text`)  | ftfy       | ftfy-rs   | speedup |
-|------------------------|-----------:|----------:|--------:|
-| clean ASCII lines      | 15.2 µs    | 0.29 µs   | **52×** |
-| clean Unicode lines    | 31.4 µs    | 1.26 µs   | **25×** |
-| mojibake lines         | 45.0 µs    | 1.97 µs   | **23×** |
-| ftfy's test cases      | 59.8 µs    | 2.18 µs   | **27×** |
-| fuzz corpus (20k)      | 71.1 µs    | 3.76 µs   | **19×** |
-| 3.6 MB document        | 0.90 MB/s  | 18.6 MB/s | **21×** |
+| workload (`fix_text`)  | ftfy       | ftfy-rs   | speedup  |
+|------------------------|-----------:|----------:|---------:|
+| clean ASCII lines      | 15.8 µs    | 0.21 µs   | **75×**  |
+| clean Unicode lines    | 32.6 µs    | 0.42 µs   | **78×**  |
+| mojibake lines         | 48.9 µs    | 1.46 µs   | **34×**  |
+| ftfy's test cases      | 69.9 µs    | 1.65 µs   | **42×**  |
+| fuzz corpus (20k)      | 68.9 µs    | 3.13 µs   | **22×**  |
+| 3.6 MB document        | 0.88 MB/s  | 94 MB/s   | **107×** |
 
-Long texts are fixed with the GIL released, so threads scale. `import ftfy_rs` takes about 35 ms, against 98 ms for ftfy.
+The fuzz corpus is three-quarters mojibake, so it's the slow case. `import ftfy_rs` takes about 35 ms, against 98 ms for ftfy.
+
+**Documents.** Real text is mostly correct, and that's where ftfy-rs is fastest. On 10 MB documents written by [`bench/make_docs.py`](https://github.com/frogscooper/ftfy-rs/blob/master/bench/make_docs.py), mostly clean text with curly quotes, HTML entities, CRLFs and a little mojibake mixed in (`python bench/bench_docs.py`, 16 CPU threads):
+
+| document | ftfy      | ftfy_rs  | speedup  |
+|----------|----------:|---------:|---------:|
+| English  | 2.7 MB/s  | 848 MB/s | **314×** |
+| French   | 1.3 MB/s  | 686 MB/s | **518×** |
+| Russian  | 3.8 MB/s  | 753 MB/s | **199×** |
+| Chinese  | 2.8 MB/s  | 634 MB/s | **223×** |
+| tweets   | 1.5 MB/s  | 598 MB/s | **402×** |
+
+Long texts are fixed on all cores, with the GIL released. From Rust, without converting Python strings, the same documents go through at 1.1–2.2 GB/s, or 260–600 MB/s on one thread (`cargo run --release --example throughput -- bench/docs/*.txt`).
 
 **Batches.** `ftfy_rs.fix_texts(texts)` fixes a whole list across all CPU cores. On 100,000 strings from the fuzz corpus, with 16 CPU threads:
 
-| 100,000 strings              | time    | vs ftfy |
-|------------------------------|--------:|--------:|
-| `ftfy.fix_text` in a loop    | 8.21 s  | 1×      |
-| `ftfy_rs.fix_text` in a loop | 0.46 s  | 18×     |
-| `ftfy_rs.fix_texts`          | 0.09 s  | **90×** |
+| 100,000 strings              | time    | vs ftfy  |
+|------------------------------|--------:|---------:|
+| `ftfy.fix_text` in a loop    | 7.05 s  | 1×       |
+| `ftfy_rs.fix_text` in a loop | 0.32 s  | 22×      |
+| `ftfy_rs.fix_texts`          | 0.07 s  | **101×** |
 
-To see where the Rust side spends its time, run `cargo run --release --example profile -- corpus.bin` (see [`bench/dump_corpus.py`](https://github.com/frogscooper/ftfy-rs/blob/master/bench/dump_corpus.py)).
+To see where the Rust side spends its time, run `cargo run --release --example profile -- corpus.bin` (see [`bench/dump_corpus.py`](https://github.com/frogscooper/ftfy-rs/blob/master/bench/dump_corpus.py)), or pass it a `.txt` document to profile line by line.
+
+## How it's fast
+
+Most text needs no fixing, so most of the speed comes from proving that cheaply and exactly:
+
+- **Bulk skipping.** A segment can only change if it has a byte outside printable ASCII, or an `&` or `<` that HTML unescaping cares about. `fix_text` looks for those eight bytes at a time and jumps straight to the next segment that has one.
+- **One scan per segment.** A single pass records which fixers could possibly change the segment, and the rest are skipped. An exhaustive test over all 1,114,112 codepoints checks that skipping never changes the result.
+- **A prefilter generated from ftfy's regex.** ftfy's mojibake detector is one big regex. [`scripts/gen_tables.py`](https://github.com/frogscooper/ftfy-rs/blob/master/scripts/gen_tables.py) walks its parsed form and derives, for every alternative, a character or a pair of adjacent characters that every match must contain, chosen to be rare in correct text. Ordinary English, French, Russian or Chinese never triggers it, so the regex doesn't run.
+- **Normalization tables.** Characters that NFC or NFKC can never change, and that can't change their neighbors, are tabulated. Text made only of those skips normalization entirely.
+- **All cores.** Long texts are split at line starts, which are always segment boundaries, and fixed in parallel. One search for the first `<` tells each chunk whether HTML unescaping is still on.
 
 ## How it stays faithful
 
@@ -85,9 +108,9 @@ There's also a native `ftfy-rs` command, written in Rust, for large files. It ta
 
 | command                         | time    | speed     | vs ftfy |
 |---------------------------------|--------:|----------:|--------:|
-| `ftfy` (Python)                 | 14.1 s  | 0.7 MB/s  | 1×      |
-| `ftfy-rs` (from the Python package) | 1.60 s | 6.6 MB/s | 9× |
-| `ftfy-rs` (native)              | 0.29 s  | 36 MB/s   | **49×** |
+| `ftfy` (Python)                 | 11.9 s  | 0.9 MB/s  | 1×      |
+| `ftfy-rs` (from the Python package) | 1.13 s | 9.3 MB/s | 10× |
+| `ftfy-rs` (native)              | 0.19 s  | 56 MB/s   | **62×** |
 
 Install it with Cargo:
 
@@ -108,6 +131,8 @@ let fixed = fix_text("schÃ¶n", &TextFixerConfig::default());
 assert_eq!(fixed, "schön");
 ```
 
+Texts over 256 KiB are fixed on rayon's global thread pool. To stay on one thread, turn off the default `parallel` feature: `ftfy-rs = { version = "0.1", default-features = false }`.
+
 ## Known differences
 
 - **Lone surrogates.** Rust strings can't hold them, so the Python bindings carry them through as private-use characters U+10F800–U+10FFFF. Input that contains *both* lone surrogates *and* real characters from that range may come out differently.
@@ -123,6 +148,7 @@ maturin develop --release
 pytest                       # upstream tests + parity tests against ftfy
 cargo test -p ftfy-rs
 python bench/bench.py
+python bench/make_docs.py bench/docs && python bench/bench_docs.py bench/docs/*.txt
 python scripts/gen_tables.py # regenerate tables.rs from the installed ftfy
 ```
 

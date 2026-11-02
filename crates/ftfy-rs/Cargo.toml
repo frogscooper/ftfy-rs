@@ -15,3 +15,12 @@ name = "ftfy_rs"
 [dependencies]
 regex = "1"
 unicode-normalization = "0.1"
+rayon = { version = "1", optional = true }
+
+[dev-dependencies]
+rayon = "1"
+
+[features]
+default = ["parallel"]
+# Fix long texts on all cores, with rayon.
+parallel = ["dep:rayon"]

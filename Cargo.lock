@@ -61,6 +61,7 @@ dependencies = [
 name = "ftfy-rs"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "regex",
  "unicode-normalization",
 ]

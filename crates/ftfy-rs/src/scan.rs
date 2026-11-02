@@ -15,9 +15,20 @@ pub const LINE_BREAK: u16 = 1 << 6;
 pub const CONTROL: u16 = 1 << 7;
 pub const ESCAPED_SURROGATE: u16 = 1 << 8;
 pub const NON_ASCII: u16 = 1 << 9;
-/// Something at or above U+0300. Text without such characters is already
-/// in NFC: nothing below it decomposes or combines.
-pub const ABOVE_U0300: u16 = 1 << 10;
+/// A character that meets a necessary condition for a badness match (see
+/// `badness::has_trigger`).
+/// Without one, the text isn't bad and fix_encoding leaves it unchanged.
+pub const MAYBE_BAD: u16 = 1 << 11;
+/// A character that NFC might change, or that might change a neighbor.
+/// Text without one is already in NFC.
+pub const NFC_ACTIVE: u16 = 1 << 12;
+/// Likewise for NFKC.
+pub const NFKC_ACTIVE: u16 = 1 << 13;
+
+use std::sync::LazyLock;
+
+use crate::badness;
+use crate::tables::{NFC_NOT_INERT, NFKC_NOT_INERT};
 
 const fn ascii_bits(b: u8) -> u16 {
     match b {
@@ -54,26 +65,56 @@ fn non_ascii_bits(ch: char) -> u16 {
             0x10F800.. => ESCAPED_SURROGATE,
             _ => 0,
         };
-    if cp >= 0x300 {
-        bits | ABOVE_U0300
-    } else {
-        bits
+    let flags = [
+        (in_ranges(&NFC_NOT_INERT, cp), NFC_ACTIVE),
+        (in_ranges(&NFKC_NOT_INERT, cp), NFKC_ACTIVE),
+    ];
+    flags
+        .into_iter()
+        .fold(bits, |bits, (set, bit)| if set { bits | bit } else { bits })
+}
+
+fn in_ranges(ranges: &[(u32, u32)], cp: u32) -> bool {
+    let i = ranges.partition_point(|&(start, _)| start <= cp);
+    i > 0 && cp <= ranges[i - 1].1
+}
+
+/// The bits for every character in the Basic Multilingual Plane.
+static BMP_BITS: LazyLock<Box<[u16]>> = LazyLock::new(|| {
+    (0..0x10000)
+        .map(|cp| char::from_u32(cp).map_or(0, non_ascii_bits))
+        .collect()
+});
+
+#[inline]
+fn char_bits(ch: char) -> u16 {
+    match ch as u32 {
+        cp @ 0x80..=0xFFFF => BMP_BITS[cp as usize],
+        _ => non_ascii_bits(ch),
     }
 }
 
 pub fn scan(text: &str) -> u16 {
     let bytes = text.as_bytes();
     let mut bits = 0;
+    // The badness prefilter class of the previous character.
+    let mut prev_class = 0;
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b < 0x80 {
             bits |= ASCII_BITS[b as usize];
+            prev_class = 0;
             i += 1;
         } else {
             // `i` is on a char boundary, since we only step over whole chars.
             let ch = text[i..].chars().next().unwrap();
-            bits |= non_ascii_bits(ch);
+            bits |= char_bits(ch);
+            let class = badness::class(ch as u32);
+            if badness::is_trigger(prev_class, class) {
+                bits |= MAYBE_BAD;
+            }
+            prev_class = class;
             i += ch.len_utf8();
         }
     }
@@ -109,13 +150,16 @@ mod tests {
                     assert_eq!(fixer(&s), s, "U+{:04X}", ch as u32);
                 }
             }
-            if bits & ABOVE_U0300 == 0 {
-                assert_eq!(
-                    crate::normalize(&s, Normalization::Nfc),
-                    s,
-                    "U+{:04X}",
-                    ch as u32
-                );
+            for (bit, form) in [
+                (NFC_ACTIVE, Normalization::Nfc),
+                (NFKC_ACTIVE, Normalization::Nfkc),
+            ] {
+                if bits & bit == 0 {
+                    assert_eq!(crate::normalize(&s, form), s, "U+{:04X}", ch as u32);
+                }
+            }
+            if bits & MAYBE_BAD == 0 {
+                assert!(!crate::is_bad(&s), "U+{:04X}", ch as u32);
             }
             assert_eq!(bits & NON_ASCII != 0, !ch.is_ascii());
         }
